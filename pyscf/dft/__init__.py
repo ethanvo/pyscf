@@ -44,6 +44,8 @@ from pyscf.dft import rks_symm
 from pyscf.dft import uks_symm
 from pyscf.dft import gks_symm
 from pyscf.dft import dks
+from pyscf.dft import rkspu
+from pyscf.dft import ukspu
 from pyscf.dft import gen_grid as grid
 from pyscf.dft import radi
 from pyscf.df import density_fit
@@ -53,6 +55,8 @@ from pyscf.dft.radi import BRAGG_RADII, COVALENT_RADII, \
         delley, mura_knowles, gauss_chebyshev, treutler, treutler_ahlrichs, \
         treutler_atomic_radii_adjust, becke_atomic_radii_adjust
 
+RKSpU = rkspu.RKSpU
+UKSpU = ukspu.UKSpU
 
 def KS(mol, xc='LDA,VWN'):
     if mol.spin == 0:
