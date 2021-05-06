@@ -48,6 +48,7 @@ from pyscf.dft import rkspu
 from pyscf.dft import ukspu
 from pyscf.dft import gen_grid as grid
 from pyscf.dft import radi
+from pyscf.dft import numint
 from pyscf.df import density_fit
 from pyscf.dft.gen_grid import sg1_prune, nwchem_prune, treutler_prune, \
         stratmann, original_becke, Grids
@@ -109,6 +110,6 @@ GKS.__doc__ = gks.GKS.__doc__
 def DKS(mol, xc='LDA,VWN'):
     from pyscf.scf import dhf
     if dhf.zquatev and mol.spin == 0:
-        return dks.RDKS(mol, *args)
+        return dks.RDKS(mol, xc=xc)
     else:
-        return dks.UDKS(mol, *args)
+        return dks.UDKS(mol, xc=xc)
