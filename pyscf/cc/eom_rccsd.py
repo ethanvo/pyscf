@@ -86,8 +86,8 @@ def kernel(eom, nroots=1, koopmans=False, guess=None, left=False,
             else: # for EOM-UCCSD
                 r1 = np.hstack([x.ravel() for x in r1])
                 qp_weight = np.linalg.norm(r1)**2
-            logger.info(eom, 'EOM-CCSD root %d E = %.16g  qpwt = %.6g  conv = %s',
-                        n, en, qp_weight, convn)
+            logger.info(eom, 'EOM-CCSD root %d E = %.16g  qpwt = %.6g  conv = %s vector = %s',
+                        n, en, qp_weight, convn, vn)
         log.timer('EOM-CCSD', *cput0)
     if nroots == 1:
         return conv[0], es[0].real, vs[0]
