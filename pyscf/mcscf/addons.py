@@ -348,7 +348,7 @@ def make_natural_orbitals (method_obj):
 
     # Diagonalize the DM in AO (using Eqn. (1) referenced above)
     A = reduce(numpy.dot, (S, Dm, S))
-    w, v = scipy.linalg.eigh(A, b = S)
+    w, v = scipy.linalg.eigh(A, b=S)
 
     # Flip NOONs (and NOs) since they're in increasing order
     noons = numpy.flip(w)
@@ -732,7 +732,7 @@ def _make_rdm12_on_mo(casdm1, casdm2, ncore, ncas, nmo):
         dm2[i,ncore:nocc,ncore:nocc,i] = dm2[ncore:nocc,i,i,ncore:nocc] = -casdm1
     return dm1, dm2
 
-# on AO representation
+# In AO representation
 def make_rdm12(casscf, mo_coeff=None, ci=None):
     if ci is None: ci = casscf.ci
     if mo_coeff is None: mo_coeff = casscf.mo_coeff
