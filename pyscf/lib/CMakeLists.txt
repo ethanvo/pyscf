@@ -82,11 +82,14 @@ endif()
 # will automatically load all settings specified in cmake.arch.inc
 #
 
-find_package(OpenMP)
-if(OPENMP_FOUND)
-  set(HAVE_OPENMP 1)
-else ()
-  set(OpenMP_C_FLAGS " ")
+option(ENABLE_OPENMP "Compiling C extensions with openmp" ON)
+set(OPENMP_C_PROPERTIES "")
+if(ENABLE_OPENMP)
+  find_package(OpenMP)
+  if(OPENMP_FOUND)
+    set(HAVE_OPENMP 1)
+    set(OPENMP_C_PROPERTIES OpenMP::OpenMP_C)
+  endif()
 endif()
 
 #find_package(PythonInterp REQUIRED)
@@ -140,11 +143,20 @@ set(CXX_LINK_TEMPLATE "<CMAKE_CXX_COMPILER> <CMAKE_SHARED_LIBRARY_CXX_FLAGS> <LA
 include(ExternalProject)
 option(BUILD_LIBCINT "Using libcint for analytical gaussian integral" ON)
 option(WITH_F12 "Compling F12 integrals" ON)
+option(USE_QCINT "Using the qcint library (optimized for x86-64) for gaussian integral evaluation" OFF)
+
 if(BUILD_LIBCINT)
 if(NOT EXISTS "${PROJECT_SOURCE_DIR}/deps/include/cint.h")
+  set(LIBCINT_GIT https://github.com/sunqm/libcint.git) # libcint is a portable, cross-platform implementation
+  if (USE_QCINT)
+    set(LIBCINT_GIT https://github.com/sunqm/qcint.git) # qcint is an optimized implementation for x86-64 architecture
+    if(NOT BUILD_MARCH_NATIVE)
+      message(WARNING "The BUILD_MARCH_NATIVE option is not specified! qcint may not compile unless you explicitly pass compiler flags that turn on vectorization!")    
+    endif()
+  endif()
+
   ExternalProject_Add(libcint
-    GIT_REPOSITORY https://github.com/sunqm/libcint.git # libcint is a portable, cross-platform implementation
-    # GIT_REPOSITORY https://github.com/sunqm/qcint.git # qcint is an optimized implementation for x86-64 architecture
+    GIT_REPOSITORY ${LIBCINT_GIT}
     GIT_TAG v5.1.0
     PREFIX ${PROJECT_BINARY_DIR}/deps
     INSTALL_DIR ${PROJECT_SOURCE_DIR}/deps
@@ -181,7 +193,7 @@ if(ENABLE_LIBXC AND BUILD_LIBXC)
   ExternalProject_Add(libxc
     #GIT_REPOSITORY https://gitlab.com/libxc/libxc.git
     #GIT_TAG master
-    URL https://gitlab.com/libxc/libxc/-/archive/5.1.7/libxc-5.1.7.tar.gz
+    URL https://gitlab.com/libxc/libxc/-/archive/5.2.0/libxc-5.2.0.tar.gz
     PREFIX ${PROJECT_BINARY_DIR}/deps
     INSTALL_DIR ${PROJECT_SOURCE_DIR}/deps
     CMAKE_ARGS -DCMAKE_BUILD_TYPE=RELEASE -DBUILD_SHARED_LIBS=1
@@ -189,6 +201,7 @@ if(ENABLE_LIBXC AND BUILD_LIBXC)
             -DCMAKE_INSTALL_LIBDIR:PATH=lib
             -DENABLE_FORTRAN=0 -DDISABLE_KXC=0 -DDISABLE_LXC=1
             -DCMAKE_C_CREATE_SHARED_LIBRARY=${C_LINK_TEMPLATE}
+            -DENABLE_XHOST:STRING=${BUILD_MARCH_NATIVE}
   )
   add_dependencies(xc_itrf libxc)
   add_dependencies(dft libxc)
