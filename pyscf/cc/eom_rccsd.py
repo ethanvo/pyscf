@@ -317,6 +317,7 @@ def ipccsd_matvec(eom, vector, imds=None, diag=None):
     nroots = 1
     Hr1[nroots:] = 0
     Hr2[nroots:, nroots:, :] = 0
+    print('IT WORKED!!!')
 
     vector = amplitudes_to_vector_ip(Hr1, Hr2)
     return vector
@@ -395,6 +396,10 @@ def ipccsd_diag(eom, imds=None):
                     Hr2[i,j,b] += -imds.Wovov[i,b,i,b]
                     Hr2[i,j,b] += -2*np.dot(imds.Woovv[j,i,b,:], t2[i,j,:,b])
                     Hr2[i,j,b] += np.dot(imds.Woovv[i,j,b,:], t2[i,j,:,b])
+
+    nroots = 1
+    Hr1[nroots:] = 0
+    Hr2[nroots:, nroots:, :] = 0
 
     vector = amplitudes_to_vector_ip(Hr1, Hr2)
     return vector
