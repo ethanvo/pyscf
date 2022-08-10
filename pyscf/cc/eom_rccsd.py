@@ -2061,8 +2061,6 @@ class CVSEOMIP(EOMIP):
             imds = eom.make_imds(eris)
 
         matvec, diag = eom.gen_matvec(imds, left=left, mandatory=mandatory, **kwargs)
-        print('MATVEC TYPE')
-        print(type(matvec))
 
         # Create mandatory vectors
         nroots = len(mandatory)
@@ -2121,6 +2119,7 @@ class CVSEOMIP(EOMIP):
         Hr1[nonessential] = 0
         Hr2[nonessential, nonessential, :] = 0
         matvec = amplitudes_to_vector_ip(Hr1, Hr2)
+        print('IT WORKED!!!')
         return matvec
 
     def get_diag(eom, imds=None, mandatory=None):
