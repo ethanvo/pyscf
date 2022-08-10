@@ -314,6 +314,9 @@ def ipccsd_matvec(eom, vector, imds=None, diag=None):
         tmp = 2*np.einsum('lkdc,kld->c', imds.Woovv, r2)
         tmp += -np.einsum('kldc,kld->c', imds.Woovv, r2)
         Hr2 += -np.einsum('c,ijcb->ijb', tmp, imds.t2)
+    nroots = 1
+    Hr1[nroots:] = 0
+    Hr2[nroots:, nroots:, :] = 0
 
     vector = amplitudes_to_vector_ip(Hr1, Hr2)
     return vector
