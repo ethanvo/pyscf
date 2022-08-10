@@ -2045,6 +2045,104 @@ def _make_tau(t2, t1, r1, fac=1, out=None):
 def _cp(a):
     return np.array(a, copy=False, order='C')
 
+########################################
+# CVS-EOM-IP-CCSD
+########################################
+
+class CVSEOMIP(EOMIP):
+    def kernel(eom, left=False, eris=None, imds=None, mandatory=None, **kwargs):
+        cput0 = (logger.process_clock(), logger.perf_counter())
+        log = logger.Logger(eom.stdout, eom.verbose)
+        if eom.verbose >= logger.WARN:
+            eom.check_sanity()
+        eom.dump_flags()
+
+        if imds is None:
+            imds = eom.make_imds(eris)
+
+        matvec, diag = eom.gen_matvec(imds, left=left, mandatory=mandatory, **kwargs)
+        print('MATVEC TYPE')
+        print(type(matvec))
+
+        # Create mandatory vectors
+        nroots = len(mandatory)
+        size = eom.vector_size()
+
+        dtype = getattr(None, 'dtype', complex)
+        guess = []
+        if mandatory is not None:
+            for orb in mandatory:
+                g = np.zeros(int(size), dtype=dtype)
+                g[orb] = 1.0
+                guess.append(g)
+
+        def precond(r, e0, x0):
+            return r/(e0-diag+1e-12)
+
+        # GHF or customized RHF/UHF may be of complex type
+        real_system = (eom._cc._scf.mo_coeff[0].dtype == np.double)
+
+        eig = lib.davidson_nosym1
+        assert len(guess) == nroots
+        def eig_close_to_init_guess(w, v, nroots, envs):
+            x0 = lib.linalg_helper._gen_x0(envs['v'], envs['xs'])
+            s = np.dot(np.asarray(guess).conj(), np.asarray(x0).T)
+            snorm = np.einsum('pi,pi->i', s.conj(), s)
+            idx = np.argsort(-snorm)[:nroots]
+            return lib.linalg_helper._eigs_cmplx2real(w, v, idx, real_system)
+
+        conv, es, vs = eig(matvec, guess, precond, pick=eig_close_to_init_guess,
+                           tol=eom.conv_tol, max_cycle=eom.max_cycle,
+                           max_space=eom.max_space, nroots=nroots, verbose=log)
+
+        if eom.verbose >= logger.INFO:
+            for n, en, vn, convn in zip(range(nroots), es, vs, conv):
+                r1, r2 = eom.vector_to_amplitudes(vn)
+                if isinstance(r1, np.ndarray):
+                    qp_weight = np.linalg.norm(r1)**2
+                else: # for EOM-UCCSD
+                    r1 = np.hstack([x.ravel() for x in r1])
+                    qp_weight = np.linalg.norm(r1)**2
+                logger.info(eom, 'EOM-CCSD root %d E = %.16g  qpwt = %.6g  conv = %s vector = %s',
+                            n, en, qp_weight, convn, vn)
+            log.timer('EOM-CCSD', *cput0)
+
+        if nroots == 1:
+            return conv[0], es[0].real, vs[0]
+        else:
+            return conv, es.real, vs
+
+    def matvec(eom, vector, imds=None, diag=None, mandatory=None):
+        matvec = ipccsd_matvec(eom, vector, imds=None, diag=None)
+        nocc = eom.nocc
+        nmo = eom.nmo
+        nonessential = np.delete(np.arange(nocc), mandatory)
+        Hr1, Hr2 = vector_to_amplitudes_ip(matvec, nmo, nocc)
+        Hr1[nonessential] = 0
+        Hr2[nonessential, nonessential, :] = 0
+        matvec = amplitudes_to_vector_ip(Hr1, Hr2)
+        return matvec
+
+    def get_diag(eom, imds=None, mandatory=None):
+        vector = ipccsd_diag(eom, imds)
+        nocc = eom.nocc
+        nmo = eom.nmo
+        nonessential = np.delete(np.arange(nocc), mandatory)
+        Hr1, Hr2 = vector_to_amplitudes_ip(vector, nmo, nocc)
+        Hr1[nonessential] = 0
+        Hr2[nonessential, nonessential, :] = 0
+        vector = amplitudes_to_vector_ip(Hr1, Hr2)
+        return vector
+
+
+    def gen_matvec(self, imds=None, left=False, mandatory=None, **kwargs):
+        if imds is None: imds = self.make_imds()
+        diag = self.get_diag(imds, mandatory=mandatory)
+        if left:
+            matvec = lambda xs: [self.l_matvec(x, imds, diag) for x in xs]
+        else:
+            matvec = lambda xs: [self.matvec(x, imds, diag, mandatory) for x in xs]
+        return matvec, diag
 
 if __name__ == '__main__':
     from pyscf import scf
