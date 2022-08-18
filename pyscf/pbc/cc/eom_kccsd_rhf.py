@@ -422,6 +422,21 @@ class EOMIP_Ta(EOMIP):
         imds.make_t3p2_ip(self._cc)
         return imds
 
+class CVSEOMIP(EOMIP):
+    def __init__(self, cc):
+        EOMIP.__init__(self, cc)
+        mandatory = list(range(cc.nocc))
+
+    def matvec(eom, vector, kshift, imds=None, diag=None):
+        nmo = eom.nmo
+        nocc = eom.nocc
+        vector = ipccsd_matvec(eom, vector, kshift, imds, diag)
+        Hr1, Hr2 = eom.vector_to_amplitudes(vector)
+        nonessential = np.delete(np.arange(nocc), eom.mandatory)
+        Hr1[nonessential] = 0
+        Hr2[:, :, nonessential, nonessential[:, np.newaxis], :] = 0
+        return eom.mask_frozen(eom.amplitudes_to_vector(Hr1, Hr2), kshift, const=0.0)
+
 ########################################
 # EOM-EA-CCSD
 ########################################

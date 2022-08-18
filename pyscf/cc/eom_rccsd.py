@@ -315,8 +315,6 @@ def ipccsd_matvec(eom, vector, imds=None, diag=None):
         tmp += -np.einsum('kldc,kld->c', imds.Woovv, r2)
         Hr2 += -np.einsum('c,ijcb->ijb', tmp, imds.t2)
     
-    Hr1[1:] = 0
-    Hr2[1:, 1:, :] = 0
     vector = amplitudes_to_vector_ip(Hr1, Hr2)
     return vector
 
@@ -603,8 +601,11 @@ class CVSEOMIP(EOMIP):
         Hr1, Hr2 = vector_to_amplitudes_ip(vector, nmo, nocc)
         print(eom.mandatory)
         nonessential = np.delete(np.arange(nocc), eom.mandatory)
+        print(nonessential)
+        print(Hr1)
         Hr1[nonessential] = 0
         Hr2[nonessential, nonessential[:, np.newaxis], :] = 0
+        print(Hr1)
         vector = amplitudes_to_vector_ip(Hr1, Hr2)
         return vector
 
