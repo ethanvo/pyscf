@@ -594,13 +594,14 @@ class EOMIP_Ta(EOMIP):
 class CVSEOMIP(EOMIP):
     def __init__(self, cc):
         EOMIP.__init__(self, cc)
-        self.mandatory = []
+        mandatory = list(range(cc.nocc))
 
     def matvec(eom, vector, imds=None, diag=None):
         nmo = eom.nmo
         nocc = eom.nocc
         vector = ipccsd_matvec(eom, vector, imds, diag)
         Hr1, Hr2 = vector_to_amplitudes_ip(vector, nmo, nocc)
+        print(eom.mandatory)
         nonessential = np.delete(np.arange(nocc), eom.mandatory)
         Hr1[nonessential] = 0
         Hr2[nonessential, nonessential[:, np.newaxis], :] = 0
