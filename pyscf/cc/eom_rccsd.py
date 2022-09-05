@@ -599,13 +599,9 @@ class CVSEOMIP(EOMIP):
         nocc = eom.nocc
         vector = ipccsd_matvec(eom, vector, imds, diag)
         Hr1, Hr2 = vector_to_amplitudes_ip(vector, nmo, nocc)
-        print(eom.mandatory)
         nonessential = np.delete(np.arange(nocc), eom.mandatory)
-        print(nonessential)
-        print(Hr1)
         Hr1[nonessential] = 0
         Hr2[nonessential, nonessential[:, np.newaxis], :] = 0
-        print(Hr1)
         vector = amplitudes_to_vector_ip(Hr1, Hr2)
         return vector
 
