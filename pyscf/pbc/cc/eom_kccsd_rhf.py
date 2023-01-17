@@ -2252,6 +2252,112 @@ class EOMEESpinFlip(EOMEE):
     def vector_size(self, kshift=0):
         return None
 
+class CVSEOMEESinglet(EOMEESinglet):
+    def __init__(self, cc):
+        EOMEESinglet.__init__(self, cc)
+        mandatory = list(range(cc.nocc))
+
+    def matvec(eom, vector, kshift, imds=None, diag=None):
+        nmo = eom.nmo
+        nocc = eom.nocc
+        vector = eeccsd_matvec_singlet(eom, vector, kshift, imds, diag)
+        Hr1, Hr2 = eom.vector_to_amplitude(vector)
+        nonessential = np.delete(np.arange(nocc), eom.mandatory)
+        Hr1[:, nonessential, :] = 0
+        Hr2[:, :, :, nonessential, nonessential[:, np.newaxis], :, :] = 0
+        return eom.amplitudes_to_vector(Hr1, Hr2)
+    
+    def eeccsd_matvec_singlet_Hr1(eom, vector, kshift, imds=None):
+        '''A mini version of eeccsd_matvec_singlet(), in the sense that
+        only Hbar.r1 is performed.'''
+
+        if imds is None: imds = eom.make_imds()
+        nkpts = eom.nkpts
+        nocc = eom.nocc
+        nvir = eom.nmo - nocc
+        r1_size = nkpts * nocc * nvir
+        kconserv_r1 = eom.get_kconserv_ee_r1(kshift)
+
+        if len(vector) != r1_size:
+            raise ValueError("vector length mismatch: expected {0}, "
+                             "found {1}".format(r1_size, len(vector)))
+        r1 = vector.reshape(nkpts, nocc, nvir)
+
+        Hr1 = np.zeros_like(r1)
+        for ki in range(nkpts):
+            #  ki - ka = kshift
+            ka = kconserv_r1[ki]
+            # r_ia <- - F_mi r_ma
+            #  km = ki
+            Hr1[ki] -= einsum('mi,ma->ia', imds.Foo[ki], r1[ki])
+            # r_ia <- F_ac r_ic
+            Hr1[ki] += einsum('ac,ic->ia', imds.Fvv[ka], r1[ki])
+            for km in range(nkpts):
+                # r_ia <- (2 W_amie - W_maie) r_me
+                #  km - ke = kshift
+                ke = kconserv_r1[km]
+                Hr1[ki] += 2. * einsum('maei,me->ia', imds.woVvO[km, ka, ke], r1[km])
+                Hr1[ki] -= einsum('maie,me->ia', imds.woVoV[km, ka, ki], r1[km])
+
+        nonessential = np.delete(np.arange(nocc), eom.mandatory)
+        Hr1[:, nonessential, :] = 0
+
+        return Hr1.ravel()
+
+
+    def eeccsd_cis_approx_slow(eom, kshift, nroots=1, imds=None, **kwargs):
+        '''Build initial R vector through diagonalization of <r1|Hbar|r1>
+
+        This method evaluates the matrix elements of Hbar in r1 space in the following way:
+        - 1st col of Hbar = matvec(r1_col1) where r1_col1 = [1, 0, 0, 0, ...]
+        - 2nd col of Hbar = matvec(r1_col2) where r1_col2 = [0, 1, 0, 0, ...]
+        - and so on
+
+        Note that such evaluation has N^3 cost, but error free (because matvec() has been proven correct).
+        '''
+        cput0 = (logger.process_clock(), logger.perf_counter())
+        log = logger.Logger(eom.stdout, eom.verbose)
+
+        if imds is None: imds = eom.make_imds()
+        nkpts, nocc, nvir = imds.t1.shape
+        dtype = imds.t1.dtype
+        r1_size = nkpts * nocc * nvir
+
+        H1 = np.zeros([r1_size, r1_size], dtype=dtype)
+        for col in range(r1_size):
+            vec = np.zeros(r1_size, dtype=dtype)
+            vec[col] = 1.0
+            H1[:, col] = eeccsd_matvec_singlet_Hr1(eom, vec, kshift, imds=imds)
+
+        eigval, eigvec = np.linalg.eig(H1)
+        idx = eigval.argsort()[:nroots]
+        eigval = eigval[idx]
+        eigvec = eigvec[:, idx]
+
+        log.timer("EOMEE CIS approx", *cput0)
+
+        return eigval, eigvec
+
+
+    def get_init_guess(eom, kshift, nroots=1, imds=None, **kwargs):
+        '''Build initial R vector through diagonalization of <r1|Hbar|r1>
+
+        Check eeccsd_cis_approx_slow() for details.
+        '''
+        if imds is None: imds = eom.make_imds()
+        nkpts, nocc, nvir = imds.t1.shape
+        dtype = imds.t1.dtype
+        r1_size = nkpts * nocc * nvir
+        vector_size = eom.vector_size(kshift)
+
+        eigval, eigvec = eeccsd_cis_approx_slow(eom, kshift, nroots, imds)
+        guess = []
+        for i in range(nroots):
+            g = np.zeros(int(vector_size), dtype=dtype)
+            g[:r1_size] = eigvec[:, i]
+            guess.append(g)
+
+        return guess
 
 imd = imdk
 
