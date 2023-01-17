@@ -20,6 +20,7 @@
 
 from functools import reduce
 import numpy as np
+import scipy
 import h5py
 
 from pyscf import lib
@@ -125,7 +126,155 @@ def kernel(cis, nroots=1, eris=None, kptlist=None, **kargs):
     log.timer("CIS", *cpu0)
     return evals, evecs
 
-def cis_matvec_singlet(cis, vector, kshift, eris=None):
+
+def _adjust_vir(mo_energy, nocc, shift):
+    """Adjust virtual orbital energies by a constant shift
+
+    Args:
+        mo_energy ([type]): [description]
+        nocc ([int]): [description]
+        shift ([float]): [description]
+    """
+    mo_energy = mo_energy.copy()
+    mo_energy[nocc:] += shift
+    return mo_energy
+
+
+def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, eris=None, scissor=None, **kwargs):
+    """Compute CIS singlet optical spectrum.
+
+    Arguments:
+        cis {[type]} -- A CIS class instance
+    """
+    cpu0 = (logger.process_clock(), logger.perf_counter())
+    log = logger.Logger(cis.stdout, cis.verbose)
+
+    kpts = cis.kpts
+    nkpts = len(kpts)
+    nocc = cis.nocc
+    nmo = cis.nmo
+    nvir = nmo - nocc
+
+    if eris is None:
+        eris = cis.ao2mo()
+
+    # Apply "scissor" to conduction band energies
+    if isinstance(scissor, (float, np.float64)):
+        logger.warn(cis, "Applying a constant scissor %s to conduction band energies", scissor)
+        eris.mo_energy = [_adjust_vir(mo_e, nocc, -scissor) for mo_e in eris.mo_energy]
+
+    # TODO enable kshift!=0 (current impl. assumes kshift=0)
+
+    #
+    # dipole(i,a) \approx -I p(i,a) / (\epsilon_a - \epsison_i)
+    # where I: imaginary unit, p: momentum operator, \epsilon: orbital energy.
+    #
+    # I.p matrix in AO basis
+
+    # TODO figure out why 'cint1e_ipovlp_cart' causes shape mismatch for `ip_ao` and `mo_coeff` when basis='gth-dzvp'.
+    # Meanwhile, let's use 'cint1e_ipovlp_sph' or 'int1e_ipovlp' because they seems to be fine.
+    ip_ao = cis._scf.cell.pbc_intor('cint1e_ipovlp_sph', kpts=kpts, comp=3)
+    ip_ao = np.asarray(ip_ao).transpose(1,0,2,3)  # with shape (naxis, nkpts, nmo, nmo)
+    ip_ao *= -1j
+
+    # I.p matrix in MO basis (only the occ-vir block)
+    mo_coeff = eris.mo_coeff
+    ip_mo = np.empty((3, nkpts, nocc, nvir), dtype=mo_coeff[0].dtype)
+    for k in range(nkpts):
+        mo_occ = mo_coeff[k][:, :nocc]
+        mo_vir = mo_coeff[k][:, nocc:]
+        for x in range(3):
+            ip_mo[x, k] = reduce(np.dot, (mo_occ.T.conj(), ip_ao[x, k], mo_vir))
+
+    # eia = \epsilon_a - \epsilon_i
+    mo_energy = eris.mo_energy
+    mo_e_o = [mo_energy[k][:nocc] for k in range(nkpts)]
+    mo_e_v = [mo_energy[k][nocc:] for k in range(nkpts)]
+    nonzero_opadding, nonzero_vpadding = padding_k_idx(cis, kind="split")
+
+    eia = np.empty((nkpts, nocc, nvir), dtype=mo_energy[0].dtype)
+    for k in range(nkpts):
+        n0_ovp_ia = np.ix_(nonzero_opadding[k], nonzero_vpadding[k])
+        eia[k][n0_ovp_ia] = -1. * (mo_e_o[k][:,None] - mo_e_v[k])[n0_ovp_ia]
+
+    # dipole in MO basis = -I p(i,a) / (\epsilon_a - \epsison_i)
+    dipole = np.empty((3, nkpts, nocc, nvir), dtype=ip_mo.dtype)
+    for x in range(3):
+        # dipole[x] = -1. * ip_mo[x] / eia
+
+        # switch to pure momentum operator
+        dipole[x] = ip_mo[x]
+
+    # solve linear equations A.x = b
+    ieta = 1j*eta
+    omega_list = scan
+    spectrum = np.zeros((3, len(omega_list)), dtype=np.complex)
+    b_vector = dipole.reshape(3, nkpts*nocc*nvir)
+    b_size = nkpts * nocc * nvir
+
+    diag = cis.get_diag(kshift, eris)
+    x0 = np.zeros((3, b_size), dtype=np.complex)
+    counter = gmres_counter(rel=True)
+    # LinearSolver = scipy.sparse.linalg.gmres
+    LinearSolver = scipy.sparse.linalg.gcrotmk
+
+    for i, omega in enumerate(omega_list):
+        matvec = lambda vec: cis.matvec(vec, kshift, eris, **kwargs)*(-1.) + (omega + ieta) * vec
+        A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=np.complex)
+
+        # preconditioner
+        # P should be close to A, but easy to solve. We choose P = H diags shifted by omega + ieta.
+        P = scipy.sparse.diags(diag * (-1.) + omega + ieta, format='csc', dtype=diag.dtype)
+        # M is the inverse of P.
+        M_x = lambda x: scipy.sparse.linalg.spsolve(P, x)
+        M = scipy.sparse.linalg.LinearOperator((b_size, b_size), M_x)
+
+        for x in range(3):
+
+            sol, info = LinearSolver(A, b_vector[x], x0=x0[x], tol=tol, maxiter=maxiter, M=M, callback=counter)
+            if info == 0:
+                print('Frequency', np.round(omega,3), 'converged in', counter.niter, 'iterations')
+            else:
+                print('Frequency', np.round(omega,3), 'not converged after', counter.niter, 'iterations')
+            counter.reset()
+
+            x0[x] = sol
+            spectrum[x,i] = np.dot(b_vector[x].conj(), sol)
+
+    log.timer('CIS Spectrum', *cpu0)
+
+    return -1./np.pi*spectrum.imag
+
+
+class gmres_counter(object):
+    def __init__(self, disp=True, rel=False):
+        self._disp = disp
+        self._rel = rel
+        self.niter = 0
+        self.rk_old = None
+    def __call__(self, rk=None):
+        # rk is residual vector for GMRES, and solution vector for GCROTMK
+        self.niter += 1
+        if self._disp:
+            if self._rel:
+                res = 0
+                if self.niter > 1:
+                    res = np.linalg.norm(rk - self.rk_old)
+                print('iter %3i\tnorm of rk = %.16f, norm of rk residual = %.16f' %
+                      (self.niter, np.linalg.norm(rk), res))
+            else:
+                print('iter %3i\tnorm of rk = %.16f' % (self.niter, np.linalg.norm(rk)))
+        if self._rel:
+            self.rk_old = rk.copy()
+
+    def reset(self):
+        self.niter = 0
+        self.rk_old = None
+
+
+
+
+def cis_matvec_singlet(cis, vector, kshift, eris=None, dielec=1.0):
     """Compute matrix-vector product of the Hamiltonion matrix and a CIS c
     oefficient vector, in the space of single excitation.
 
@@ -136,6 +285,8 @@ def cis_matvec_singlet(cis, vector, kshift, eris=None):
             Available k-shift indices depend on the k-point mesh. For example,
             a 2 by 2 by 2 k-point mesh allows at most 8 k-shift values, which can
             be targeted by 0, 1, 2, 3, 4, 5, 6, or 7.
+        dielec {float} -- macroscopic dielectric constant, used to scale (oo|vv)
+            type integral.
 
     Keyword Arguments:
         eris {_CIS_ERIS} -- Depending on cis.direct, eris may
@@ -146,6 +297,9 @@ def cis_matvec_singlet(cis, vector, kshift, eris=None):
         1D array -- matrix-vector product of the Hamiltonion matrix and the
             input vector.
     """
+    cput0 = (logger.process_clock(), logger.perf_counter())
+    log = logger.Logger(cis.stdout, cis.verbose)
+
     if eris is None:
         eris = cis.ao2mo()
     nkpts = cis.nkpts
@@ -155,7 +309,14 @@ def cis_matvec_singlet(cis, vector, kshift, eris=None):
     r = cis.vector_to_amplitudes(vector)
 
     # Should use Fock diagonal elements to build (e_a - e_i) matrix
-    epsilons = [eris.fock[k].diagonal().real for k in range(nkpts)]
+    # epsilons = [eris.fock[k].diagonal().real for k in range(nkpts)]
+    # Assume mo_energy comes from Fock diagonal
+    epsilons = eris.mo_energy
+
+    # Scaling factor of (oo|vv) type integral
+    scale = 1.0 / dielec
+    if dielec != 1.0:
+        logger.warn(cis, "Scale (oo|vv) type integral by 1/%s", dielec)
 
     Hr = np.zeros_like(r)
     for ki in range(nkpts):
@@ -168,7 +329,7 @@ def cis_matvec_singlet(cis, vector, kshift, eris=None):
             ka = kconserv_r[ki]
             # x: kj
             Hr[ki] += 2.0 * einsum("xjb,xajib->ia", r, eris.voov[ka, :, ki])
-            Hr[ki] -= einsum("xjb,xjaib->ia", r, eris.ovov[:, ka, ki])
+            Hr[ki] -= scale * einsum("xjb,xjaib->ia", r, eris.ovov[:, ka, ki])
     else:
         for ki in range(nkpts):
             ka = kconserv_r[ki]
@@ -180,10 +341,11 @@ def cis_matvec_singlet(cis, vector, kshift, eris=None):
 
                 # r_ia <- - r_jb (ab|ji) = -r_jb B^L_ab B^L_ji
                 Lja = -1.0 * einsum("jb,Lab->Lja", r[kj], eris.Lpq_mo[ka,kb][:, nocc:, nocc:])
-                tmp += einsum("Lja,Lji->ia", Lja, eris.Lpq_mo[kj,ki][:, :nocc, :nocc])
+                tmp += scale * einsum("Lja,Lji->ia", Lja, eris.Lpq_mo[kj,ki][:, :nocc, :nocc])
                 Hr[ki] += (1. / nkpts) * tmp
 
     vector = cis.amplitudes_to_vector(Hr)
+    log.timer("matvec KCIS Singlet", *cput0)
     return vector
 
 def cis_H(cis, kshift, eris=None):
@@ -296,7 +458,7 @@ def cis_diag(cis, kshift, eris=None):
     nvir = nmo - nocc
     kconserv_r = cis.get_kconserv_r(kshift)
     dtype = eris.dtype
-    epsilons = [eris.fock[k].diagonal().real for k in range(nkpts)]
+    epsilons = eris.mo_energy
 
     Hdiag = np.zeros((nkpts, nocc, nvir), dtype=dtype)
     for ki in range(nkpts):
@@ -384,6 +546,7 @@ class KCIS(lib.StreamObject):
     get_diag = cis_diag
     matvec = cis_matvec_singlet
     kernel = kernel
+    get_absorption_spectrum = optical_absorption_singlet
 
     def vector_size(self):
         nocc = self.nocc
@@ -473,15 +636,18 @@ class _CIS_ERIS:
 
         mo_coeff = self.mo_coeff = padded_mo_coeff(cis, mo_coeff)
 
-        # Re-make our fock MO matrix elements from density and fock AO
-        dm = cis._scf.make_rdm1(cis.mo_coeff, cis.mo_occ)
-        exxdiv = cis._scf.exxdiv if cis.keep_exxdiv else None
-        with lib.temporary_env(cis._scf, exxdiv=exxdiv):
-            # _scf.exxdiv affects eris.fock. HF exchange correction should be
-            # excluded from the Fock matrix.
-            fockao = cis._scf.get_hcore() + cis._scf.get_veff(cell, dm)
-        self.fock = np.asarray([reduce(np.dot, (mo.T.conj(), fockao[k], mo))
-                                for k, mo in enumerate(mo_coeff)])
+        if getattr(cis._scf, "fock", None) is not None:
+            self.fock = cis._scf.fock
+        else:
+            # Re-make our fock MO matrix elements from density and fock AO
+            dm = cis._scf.make_rdm1(cis.mo_coeff, cis.mo_occ)
+            exxdiv = cis._scf.exxdiv if cis.keep_exxdiv else None
+            with lib.temporary_env(cis._scf, exxdiv=exxdiv):
+                # _scf.exxdiv affects eris.fock. HF exchange correction should be
+                # excluded from the Fock matrix.
+                fockao = cis._scf.get_hcore() + cis._scf.get_veff(cell, dm)
+            self.fock = np.asarray([reduce(np.dot, (mo.T.conj(), fockao[k], mo))
+                                    for k, mo in enumerate(mo_coeff)])
 
         self.mo_energy = [self.fock[k].diagonal().real for k in range(nkpts)]
 

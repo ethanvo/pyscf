@@ -645,6 +645,24 @@ class RCCSD(pyscf.cc.ccsd.CCSD):
     def ao2mo(self, mo_coeff=None):
         return _ERIS(self, mo_coeff)
 
+    def solve_lambda(self, t1=None, t2=None, l1=None, l2=None, eris=None, imds=None):
+        from pyscf.pbc.cc import kccsd_rhf_lambda
+        if t1 is None: t1 = self.t1
+        if t2 is None: t2 = self.t2
+        if eris is None: eris = self.ao2mo(self.mo_coeff)
+
+        # initial guess of lambda: Lambda = T^{\dagger}
+        # correct to 2nd order in the HF reference
+        if l1 is None: l1 = t1.conj()
+        if l2 is None: l2 = t2.conj()
+
+        self.converged_lambda, self.l1, self.l2 = \
+            kccsd_rhf_lambda.kernel(self, eris, t1, t2, l1, l2, imds,
+                                    max_cycle=self.max_cycle, 
+                                    tol=self.conv_tol_normt, 
+                                    verbose=self.verbose)
+        return self.l1, self.l2
+        
 #####################################
 # Wrapper functions for IP/EA-EOM
 #####################################
@@ -728,17 +746,21 @@ class _ERIS:  # (pyscf.cc.ccsd._ChemistsERIs):
 
         mo_coeff = self.mo_coeff = padded_mo_coeff(cc, mo_coeff)
 
-        # Re-make our fock MO matrix elements from density and fock AO
-        dm = cc._scf.make_rdm1(cc.mo_coeff, cc.mo_occ)
-        exxdiv = cc._scf.exxdiv if cc.keep_exxdiv else None
-        with lib.temporary_env(cc._scf, exxdiv=exxdiv):
-            # _scf.exxdiv affects eris.fock. HF exchange correction should be
-            # excluded from the Fock matrix.
-            vhf = cc._scf.get_veff(cell, dm)
-        fockao = cc._scf.get_hcore() + vhf
-        self.fock = np.asarray([reduce(np.dot, (mo.T.conj(), fockao[k], mo))
-                                for k, mo in enumerate(mo_coeff)])
-        self.e_hf = cc._scf.energy_tot(dm=dm, vhf=vhf)
+        if getattr(cc._scf, "fock", None) is not None and getattr(cc._scf, "e_tot", None):
+            self.fock = cc._scf.fock
+            self.e_hf = cc._scf.e_tot
+        else:
+            # Re-make our fock MO matrix elements from density and fock AO
+            dm = cc._scf.make_rdm1(cc.mo_coeff, cc.mo_occ)
+            exxdiv = cc._scf.exxdiv if cc.keep_exxdiv else None
+            with lib.temporary_env(cc._scf, exxdiv=exxdiv):
+                # _scf.exxdiv affects eris.fock. HF exchange correction should be
+                # excluded from the Fock matrix.
+                vhf = cc._scf.get_veff(cell, dm)
+            fockao = cc._scf.get_hcore() + vhf
+            self.fock = np.asarray([reduce(np.dot, (mo.T.conj(), fockao[k], mo))
+                                    for k, mo in enumerate(mo_coeff)])
+            self.e_hf = cc._scf.energy_tot(dm=dm, vhf=vhf)
 
         self.mo_energy = [self.fock[k].diagonal().real for k in range(nkpts)]
 
