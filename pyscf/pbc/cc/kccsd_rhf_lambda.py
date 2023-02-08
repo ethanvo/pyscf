@@ -52,7 +52,6 @@ def update_lambda(cc, t1, t2, l1, l2, eris, imds):
     Spin adapted version of the following equations:
         Gauss and Stanton, J. Chem. Phys. 103, 3561 (1995) Table II. Unperturbed lambda equations (a) and (b)
     """
-    time0 = time.clock(), time.time()
     log = logger.Logger(cc.stdout, cc.verbose)
 
     nkpts, nocc, nvir = t1.shape
@@ -258,8 +257,6 @@ def update_lambda(cc, t1, t2, l1, l2, eris, imds):
         eijab = eia[:, None, :, None] + ejb[:, None, :]
 
         l2new[ki, kj, ka] /= eijab
-
-    time0 = log.timer_debug1('update l1 l2', *time0)
 
     return l1new, l2new
     
