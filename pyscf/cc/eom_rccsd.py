@@ -1742,6 +1742,22 @@ class EOMEESpinFlip(EOMEE):
         naaba = nocc*(nocc-1)//2*nvir*nvir
         return nocc*nvir + nbaaa + naaba
 
+class CVSEOMEESinglet(EOMEESinglet):
+    def __init__(self, cc):
+        EOMEESinglet.__init__(self, cc)
+        mandatory = list(range(cc.nocc))
+
+    def matvec(eom, vector, imds=None):
+        nmo = eom.nmo
+        nocc = eom.nocc
+        vector = eeccsd_matvec_singlet(eom, vector, imds=imds)
+        Hr1, Hr2 = vector_to_amplitudes_singlet(vector, nmo, nocc)
+        nonessential = np.delete(np.arange(nocc), eom.mandatory)
+        Hr1[nonessential, :] = 0
+        Hr2[nonessential, nonessentail[:, np.newaxis], :, :] = 0
+        vector = amplitudes_to_vector_singlet(Hr1, Hr2)
+        return vector
+
 #TODO: Check whether EOM methods works with rccsd.RCCSD when orbitals are complex
 ccsd.CCSD.EOMIP         = lib.class_as_method(EOMIP)
 ccsd.CCSD.EOMIP_Ta      = lib.class_as_method(EOMIP_Ta)
