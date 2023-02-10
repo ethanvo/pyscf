@@ -1335,8 +1335,11 @@ def kernel_ee(eom, nroots=1, koopmans=False, guess=None, left=False,
         # provide guesses. Similarly, `guess` from the previous `kshift` may not
         # work for the current `kshift` due to different vector_size. Thus for
         # now we keep `user_guess` false, and always compute `guess` on our own.
-        user_guess = False
-        guess = eom.get_init_guess(kshift, nroots, koopmans=koopmans, diag=diag, imds=imds)
+        if guess is None:
+            user_guess = False
+            guess = eom.get_init_guess(kshift, nroots, koopmans=koopmans, diag=diag, imds=imds)
+        else:
+            user_guess = True
         for ig, g in enumerate(guess):
             guess_norm = np.linalg.norm(g)
             guess_norm_tol = LOOSE_ZERO_TOL

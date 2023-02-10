@@ -2285,7 +2285,7 @@ def cvs_eeccsd_matvec_singlet_Hr1(eom, vector, kshift, imds=None):
             Hr1[ki] -= einsum('maie,me->ia', imds.woVoV[km, ka, ki], r1[km])
 
     nonessential = np.delete(np.arange(nocc), eom.mandatory)
-    Hr1[:, nonessential, :] = 0
+    Hr1[:, nonessential, :] += 10.0e16
 
     return Hr1.ravel()
 
@@ -2313,7 +2313,13 @@ def cvs_eeccsd_cis_approx_slow(eom, kshift, nroots=1, imds=None, **kwargs):
         vec = np.zeros(r1_size, dtype=dtype)
         vec[col] = 1.0
         H1[:, col] = cvs_eeccsd_matvec_singlet_Hr1(eom, vec, kshift, imds=imds)
-
+    '''
+    print("NEW CIS")
+    nonessential = np.delete(np.arange(nocc), eom.mandatory)
+    H1 = H1.reshape(nkpts, nocc, nvir, nkpts, nocc, nvir)
+    H1[:, nonessential, :, :, nonessential[:, np.newaxis], :] += 10e16
+    H1 = H1.reshape(r1_size, r1_size)
+    '''
     eigval, eigvec = np.linalg.eig(H1)
     idx = eigval.argsort()[:nroots]
     eigval = eigval[idx]
