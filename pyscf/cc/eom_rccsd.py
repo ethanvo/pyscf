@@ -1754,7 +1754,7 @@ class CVSEOMEESinglet(EOMEESinglet):
         Hr1, Hr2 = vector_to_amplitudes_singlet(vector, nmo, nocc)
         nonessential = np.delete(np.arange(nocc), eom.mandatory)
         Hr1[nonessential, :] = 0
-        Hr2[nonessential, nonessentail[:, np.newaxis], :, :] = 0
+        Hr2[nonessential, nonessential[:, np.newaxis], :, :] = 0
         vector = amplitudes_to_vector_singlet(Hr1, Hr2)
         return vector
 
