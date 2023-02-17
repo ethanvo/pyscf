@@ -586,6 +586,26 @@ class EOMIP_Ta(EOMIP):
         return imds
 
 ########################################
+# CVS-EOM-IP-CCSD
+########################################
+
+class CVSEOMIP(EOMIP):
+    def __init__(self, cc):
+        EOMIP.__init__(self, cc)
+        mandatory = list(range(cc.nocc))
+
+    def matvec(eom, vector, imds=None, diag=None):
+        nmo = eom.nmo
+        nocc = eom.nocc
+        vector = ipccsd_matvec(eom, vector, imds, diag)
+        Hr1, Hr2 = vector_to_amplitudes_ip(vector, nmo, nocc)
+        nonessential = np.delete(np.arange(nocc), eom.mandatory)
+        Hr1[nonessential] += 10.0e15
+        Hr2[nonessential, nonessential[:, np.newaxis], :] += 10.0e15
+        vector = amplitudes_to_vector_ip(Hr1, Hr2)
+        return vector
+
+########################################
 # EOM-EA-CCSD
 ########################################
 
