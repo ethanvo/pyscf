@@ -595,14 +595,32 @@ class CVSEOMIP(EOMIP):
         mandatory = list(range(cc.nocc))
 
     def matvec(eom, vector, imds=None, diag=None):
+        dtype = np.result_type(vector)
         nmo = eom.nmo
         nocc = eom.nocc
-        vector = ipccsd_matvec(eom, vector, imds, diag)
-        Hr1, Hr2 = vector_to_amplitudes_ip(vector, nmo, nocc)
         nonessential = np.delete(np.arange(nocc), eom.mandatory)
-        Hr1[nonessential] = 0
-        Hr2[nonessential, nonessential[:, np.newaxis], :] = 0
+        input_vec = vector.copy()
+        vec1, vec2 = vector_to_amplitudes_ip(input_vec, nmo, nocc)
+        e_shift1 = np.zeros_like(vec1)
+        e_shift2 = np.zeros_like(vec2)
+        e_shift1[nonessential] = vec1[nonessential] * 10.0e15
+        e_shift2[nonessential, nonessential[:, np.newaxis], :] = vec2[nonessential, nonessential[:, np.newaxis], :] * 10.0e15
+        e_shift = amplitudes_to_vector_ip(e_shift1, e_shift2)
+        vector = ipccsd_matvec(eom, vector, imds, diag)
+        vector += e_shift
+
+        return vector
+
+    def get_diag(eom, imds=None):
+        nmo = eom.nmo
+        nocc = eom.nocc
+        nonessential = np.delete(np.arange(nocc), eom.mandatory)
+        vector = ipccsd_diag(eom, imds)
+        Hr1, Hr2 = vector_to_amplitudes_ip(vector, nmo, nocc)
+        Hr1[nonessential] += 10.0e15
+        Hr2[nonessential, nonessential[:, np.newaxis], :] += 10.0e15
         vector = amplitudes_to_vector_ip(Hr1, Hr2)
+
         return vector
 
 ########################################
@@ -1688,6 +1706,40 @@ class EOMEESinglet(EOMEE):
         nvir = self.nmo - nocc
         nov = nocc * nvir
         return nov + nov*(nov+1)//2
+
+class CVSEOMEESinglet(EOMEESinglet):
+    def __init__(self, cc):
+        EOMEESinglet.__init__(self, cc)
+        mandatory = list(range(cc.nocc))
+
+    def matvec(eom, vector, imds=None):
+        dtype = np.result_type(vector)
+        nmo = eom.nmo
+        nocc = eom.nocc
+        nonessential = np.delete(np.arange(nocc), eom.mandatory)
+        input_vec = vector.copy()
+        vec1, vec2 = vector_to_amplitudes_singlet(vector, nmo, nocc)
+        e_shift1 = np.zeros_like(vec1)
+        e_shift2 = np.zeros_like(vec2)
+        e_shift1[nonessential, :] = vec1[nonessential] * 10.0e15
+        e_shift2[nonessential, nonessential[:, np.newaxis], :, :] = vec2[nonessential, nonessential[:, np.newaxis], :, :] * 10.0e15
+        e_shift = amplitudes_to_vector_singlet(e_shift1, e_shift2)
+        vector = eeccsd_matvec_singlet(eom, vector, imds)
+        vector += e_shift
+
+        return vector
+
+    def get_diag(eom, imds=None):
+        nmo = eom.nmo
+        nocc = eom.nocc
+        nonessential = np.delete(np.arange(nocc), eom.mandatory)
+        vec_eeS, vec_eeT, vec_sf = eeccsd_diag(eom, imds)
+        Hr1, Hr2 = vector_to_amplitudes_singlet(vec_eeS, nmo, nocc)
+        Hr1[nonessential, :] += 10e15
+        Hr2[nonessential, nonessential[:, np.newaxis], :, :] += 10.0e15
+        vec_eeS = amplitudes_to_vector_singlet(Hr1, Hr2)
+
+        return vec_eeS, vec_eeT, vec_sf
 
 
 class EOMEETriplet(EOMEE):
