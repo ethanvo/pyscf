@@ -2283,10 +2283,7 @@ def cvs_eeccsd_matvec_singlet_Hr1(eom, vector, kshift, imds=None):
             ke = kconserv_r1[km]
             Hr1[ki] += 2. * einsum('maei,me->ia', imds.woVvO[km, ka, ke], r1[km])
             Hr1[ki] -= einsum('maie,me->ia', imds.woVoV[km, ka, ki], r1[km])
-
-    nonessential = np.delete(np.arange(nocc), eom.mandatory)
-    Hr1[:, nonessential, :] += 10.0e16
-
+    
     return Hr1.ravel()
 
 
@@ -2306,25 +2303,30 @@ def cvs_eeccsd_cis_approx_slow(eom, kshift, nroots=1, imds=None, **kwargs):
     if imds is None: imds = eom.make_imds()
     nkpts, nocc, nvir = imds.t1.shape
     dtype = imds.t1.dtype
+    
     r1_size = nkpts * nocc * nvir
+    r1_cvs_size = nkpts * len(eom.mandatory) * nvir
+    r1_col = np.arange(r1_size, dtype=int)
+    r1_col = r1_col.reshape(nkpts, nocc, nvir)
+    r1_col = r1_col[:, eom.mandatory, :].ravel()
+    r1_vecs = np.identity(r1_size, dtype=dtype)
+    
+    H1 = np.zeros([r1_cvs_size, r1_cvs_size], dtype=dtype)
+    for i, col in enumerate(r1_col):
+        vec = r1_vecs[col]
+        full_vec = eeccsd_matvec_singlet_Hr1(eom, vec, kshift, imds=imds)
+        full_vec = full_vec.reshape(nkpts, nocc, nvir)
+        H1[:, i] = full_vec[:, eom.mandatory, :].ravel()
 
-    H1 = np.zeros([r1_size, r1_size], dtype=dtype)
-    for col in range(r1_size):
-        vec = np.zeros(r1_size, dtype=dtype)
-        vec[col] = 1.0
-        H1[:, col] = cvs_eeccsd_matvec_singlet_Hr1(eom, vec, kshift, imds=imds)
-    '''
-    print("NEW CIS")
-    nonessential = np.delete(np.arange(nocc), eom.mandatory)
-    H1 = H1.reshape(nkpts, nocc, nvir, nkpts, nocc, nvir)
-    H1[:, nonessential, :, :, nonessential[:, np.newaxis], :] += 10e16
-    H1 = H1.reshape(r1_size, r1_size)
-    '''
     eigval, eigvec = np.linalg.eig(H1)
     idx = eigval.argsort()[:nroots]
     eigval = eigval[idx]
     eigvec = eigvec[:, idx]
-
+    r1_expand = np.zeros((r1_size, nroots), dtype=dtype)
+    r1_expand = r1_expand.reshape(nkpts, nocc, nvir, nroots)
+    r1_expand[:, eom.mandatory, :, :] = eigvec.reshape(nkpts, len(eom.mandatory), nvir, nroots)
+    eigvec = r1_expand.reshape(r1_size, nroots)
+    
     log.timer("EOMEE CIS approx", *cput0)
 
     return eigval, eigvec
