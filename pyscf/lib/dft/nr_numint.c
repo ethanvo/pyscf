@@ -17,6 +17,7 @@
  */
 
 #include <stdlib.h>
+#include <stdint.h>
 #include <assert.h>
 #include "config.h"
 #include "gto/grid_ao_drv.h"
@@ -41,13 +42,14 @@ int VXCao_empty_blocks(int8_t *empty, uint8_t *non0table, int *shls_slice,
         int has0 = 0;
         empty[box_id] = 1;
         for (bas_id = sh0; bas_id < sh1; bas_id++) {
-                empty[box_id] &= !non0table[bas_id];
                 if (ao_loc[bas_id] == bound) {
                         has0 |= empty[box_id];
                         box_id++;
                         bound += BOXSIZE;
                         empty[box_id] = 1;
-                } else if (ao_loc[bas_id] > bound) {
+                }
+                empty[box_id] &= !non0table[bas_id];
+                if (ao_loc[bas_id+1] > bound) {
                         has0 |= empty[box_id];
                         box_id++;
                         bound += BOXSIZE;
@@ -274,6 +276,41 @@ void VXC_vv10nlc(double *Fvec, double *Uvec, double *Wvec,
                 Fvec[i] = F * -1.5;
                 Uvec[i] = U;
                 Wvec[i] = W;
+        }
+}
+}
+
+void VXC_vv10nlc_grad(double *Fvec, double *vvcoords, double *coords,
+                      double *W0p, double *W0, double *K, double *Kp, double *RpW,
+                      int vvngrids, int ngrids)
+{
+#pragma omp parallel
+{
+        double DX, DY, DZ, R2;
+        double gp, g, gt, T, Q, FX, FY, FZ;
+        int i, j;
+#pragma omp for schedule(static)
+        for (i = 0; i < ngrids; i++) {
+                FX = 0;
+                FY = 0;
+                FZ = 0;
+                for (j = 0; j < vvngrids; j++) {
+                        DX = vvcoords[j*3+0] - coords[i*3+0];
+                        DY = vvcoords[j*3+1] - coords[i*3+1];
+                        DZ = vvcoords[j*3+2] - coords[i*3+2];
+                        R2 = DX*DX + DY*DY + DZ*DZ;
+                        gp = R2*W0p[j] + Kp[j];
+                        g  = R2*W0[i] + K[i];
+                        gt = g + gp;
+                        T = RpW[j] / (g*gp*gt);
+                        Q = T * (W0[i]/g + W0p[j]/gp + (W0[i]+W0p[j])/gt);
+                        FX += Q * DX;
+                        FY += Q * DY;
+                        FZ += Q * DZ;
+                }
+                Fvec[i*3+0] = FX * -3;
+                Fvec[i*3+1] = FY * -3;
+                Fvec[i*3+2] = FZ * -3;
         }
 }
 }
