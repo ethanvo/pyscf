@@ -18,7 +18,7 @@ def get_ase_atom(formula):
     formula = formula.lower()
     assert formula in ['lih','lif','licl','mgo',
                        'c','si','ge','sic','gaas','gan','cds',
-                       'zns','zno','bn','alp']
+                       'zns','zno','bn','alp','bp','aln','mgs']
     if formula == 'lih':
         ase_atom = get_ase_rocksalt('Li','H')
     elif formula == 'lif':
@@ -49,17 +49,25 @@ def get_ase_atom(formula):
         ase_atom = get_ase_zincblende('Cd','S')
     elif formula == 'zns':
         ase_atom = get_ase_zincblende('Zn','S')
+    elif formula == 'bp':
+        ase_atom = get_ase_zincblende('B','P')
+    elif formula == 'aln':
+        ase_atom = get_ase_wurtzite('Al','N')
+    elif formula == 'mgs':
+        ase_atom = get_ase_rocksalt('Mg','S')
 
     return ase_atom
 
 def get_ase_wurtzite(A='Zn', B='O'):
     # Lattice constants taken from wikipedia (TODO: is wikipedia a valid
     # citation at this point? en.wikipedia.org/wiki/Lattice_constant)
-    assert A in ['Zn']
-    assert B in ['O']
+    assert A in ['Zn','Al']
+    assert B in ['O','N']
     from ase.lattice import bulk
     if A=='Zn' and B=='O':
         ase_atom = bulk('ZnO', 'wurtzite', a=3.25*A2B, c=5.2*A2B)
+    elif A=='Al' and B=='N':
+        ase_atom = bulk('AlN', 'wurtzite', a=3.11*A2B, c=4.98*A2B)
     else:
         raise NotImplementedError('No formula found for system %s %s. '
                                   'Choose a different system?  Or add it to the list!' % (A, B))
@@ -101,6 +109,8 @@ def get_ase_zincblende(A='Ga', B='As'):
         ase_atom = bulk('BN', 'zincblende', a=3.615*A2B)
     elif A=='Al' and B=='P':
         ase_atom = bulk('AlP', 'zincblende', a=5.451*A2B)
+    elif A=='B' and B=='P':
+        ase_atom = bulk('BP', 'zincblende', a=4.538*A2B)
     else:
         raise NotImplementedError('No formula found for system %s %s. '
                                   'Choose a different system?  Or add it to the list!' % (A, B))
@@ -110,7 +120,7 @@ def get_ase_zincblende(A='Ga', B='As'):
 def get_ase_rocksalt(A='Li', B='Cl'):
     assert A in ['Li', 'Mg']
     # Add Na, K
-    assert B in ['H', 'F', 'Cl', 'O']
+    assert B in ['H', 'F', 'Cl', 'O', 'S']
     # Add Br, I
     from ase.lattice import bulk
     if A=='Li':
@@ -122,6 +132,8 @@ def get_ase_rocksalt(A='Li', B='Cl'):
             ase_atom = bulk('LiCl', 'rocksalt', a=5.13*A2B)
     elif A=='Mg' and B=='O':
         ase_atom = bulk('MgO', 'rocksalt', a=4.213*A2B)
+    elif A=='Mg' and B=='S':
+        ase_atom = bulk('MgS', 'rocksalt', a=5.191*A2B)
     else:
         raise NotImplementedError('No formula found for system %s %s. '
                                   'Choose a different system?  Or add it to the list!' % (A, B))

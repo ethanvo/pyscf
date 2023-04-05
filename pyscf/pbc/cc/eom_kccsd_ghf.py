@@ -1335,8 +1335,11 @@ def kernel_ee(eom, nroots=1, koopmans=False, guess=None, left=False,
         # provide guesses. Similarly, `guess` from the previous `kshift` may not
         # work for the current `kshift` due to different vector_size. Thus for
         # now we keep `user_guess` false, and always compute `guess` on our own.
-        user_guess = False
-        guess = eom.get_init_guess(kshift, nroots, koopmans=koopmans, diag=diag, imds=imds)
+        if guess is None:
+            user_guess = False
+            guess = eom.get_init_guess(kshift, nroots, koopmans=koopmans, diag=diag, imds=imds)
+        else:
+            user_guess = True
         for ig, g in enumerate(guess):
             guess_norm = np.linalg.norm(g)
             guess_norm_tol = LOOSE_ZERO_TOL
@@ -1820,10 +1823,14 @@ class EOMEE(eom_rccsd.EOM):
         nkpts = kpts.shape[0]
         a = cell.lattice_vectors() / (2 * np.pi)
 
+        # Since kshift must be chosen as the difference between kpts,
+        # we should shift the origin back to Gamma
+        shifts = np.asarray([kv - kpts[0] for kv in kpts])
+
         kconserv_r2 = np.zeros((nkpts, nkpts, nkpts), dtype=int)
         kvKLM = kpts[:, None, None, :] - kpts[:, None, :] + kpts
         # Apply k shift
-        kvKLM = kvKLM - kpts[kshift]
+        kvKLM = kvKLM - shifts[kshift]
         for N, kvN in enumerate(kpts):
             kvKLMN = np.einsum('wx,klmx->wklm', a, kvKLM - kvN)
             # check whether (1/(2pi) k_{KLMN} dot a) is an integer

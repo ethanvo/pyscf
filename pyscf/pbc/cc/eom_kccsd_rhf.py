@@ -14,9 +14,10 @@
 # limitations under the License.
 
 import itertools
-
+from functools import reduce
 import sys
 import numpy as np
+import scipy
 
 from pyscf import lib
 from pyscf.lib import logger
@@ -28,7 +29,7 @@ from pyscf.pbc.cc.kccsd_rhf import _get_epq
 from pyscf.pbc.cc.kccsd_t_rhf import _get_epqr
 from pyscf.pbc.lib import kpts_helper
 from pyscf.pbc.mp.kmp2 import (get_frozen_mask, get_nocc, get_nmo,
-                               padded_mo_coeff, padding_k_idx)  # noqa
+                               padded_mo_coeff, padded_mo_energy, padding_k_idx)  # noqa
 
 einsum = lib.einsum
 
@@ -422,6 +423,40 @@ class EOMIP_Ta(EOMIP):
         imds = _IMDS(self._cc, eris=eris)
         imds.make_t3p2_ip(self._cc)
         return imds
+
+class CVSEOMIP(EOMIP):
+    def __init__(self, cc):
+        EOMIP.__init__(self, cc)
+        mandatory = list(range(cc.nocc))
+
+    def matvec(eom, vector, kshift, imds=None, diag=None):
+        dtype = np.result_type(vector)
+        nmo = eom.nmo
+        nocc = eom.nocc
+        nonessential = np.delete(np.arange(nocc), eom.mandatory)
+        input_vec = vector.copy()
+        vec1, vec2 = eom.vector_to_amplitudes(input_vec)
+        e_shift1 = np.zeros_like(vec1)
+        e_shift2 = np.zeros_like(vec2)
+        e_shift1[nonessential] = vec1[nonessential] * 10.0e15
+        e_shift2[:, :, nonessential, nonessential[:, np.newaxis], :] = vec2[:, :, nonessential, nonessential[:, np.newaxis], :] * 10.0e15
+        e_shift = eom.amplitudes_to_vector(e_shift1, e_shift2)
+        vector = ipccsd_matvec(eom, vector, kshift, imds, diag)
+        vector += e_shift
+
+        return vector
+
+    def get_diag(eom, kshift, imds=None, diag=None):
+        nmo = eom.nmo
+        nocc = eom.nocc
+        nonessential = np.delete(np.arange(nocc), eom.mandatory)
+        vector = ipccsd_diag(eom, kshift, imds, diag)
+        Hr1, Hr2 = eom.vector_to_amplitudes(vector)
+        Hr1[nonessential] += 10.0e15
+        Hr2[:, :, nonessential, nonessential[:, np.newaxis], :] += 10.0e15
+        vector = eom.amplitudes_to_vector(Hr1, Hr2)
+
+        return vector
 
 ########################################
 # EOM-EA-CCSD
@@ -839,11 +874,709 @@ def eomee_ccsd_singlet(eom, nroots=1, koopmans=False, guess=None, left=False,
                        eris=None, imds=None, diag=None, partition=None,
                        kptlist=None, dtype=None):
     '''See `eom_kgccsd.kernel()` for a description of arguments.'''
+    if partition:
+        eom.partition = partition.lower()
+        assert eom.partition in ['mp', 'full']
     eom.converged, eom.e, eom.v  \
             = eom_kgccsd.kernel_ee(eom, nroots, koopmans, guess, left, eris=eris,
                                    imds=imds, diag=diag, partition=partition,
                                    kptlist=kptlist, dtype=dtype)
     return eom.e, eom.v
+
+
+def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, imds=None, x0=None,
+                                       partition=None, **kwargs):
+    """ Compute approximate spectra assuming:
+            lambda = 0, \bar{\mu} = \mu
+
+    Args:
+        eom ([type]): [description]
+        scan ([type]): [description]
+        eta ([type]): [description]
+        kshift (int, optional): [description]. Defaults to 0.
+        tol ([type], optional): [description]. Defaults to 1e-5.
+        maxiter (int, optional): [description]. Defaults to 500.
+        imds ([type], optional): [description]. Defaults to None.
+
+    Returns:
+        [type]: [description]
+    """
+    cpu0 = (logger.process_clock(), logger.perf_counter())
+    log = logger.Logger(eom.stdout, eom.verbose)
+
+    if imds is None: imds = eom.make_imds()
+
+    if partition:
+        eom.partition = partition.lower()
+        assert eom.partition in ['mp','full']
+
+    nkpts = eom.nkpts
+    nocc = eom.nocc
+    nmo = eom.nmo
+    nvir = nmo - nocc
+    kconserv2 = eom.get_kconserv_ee_r2(kshift)
+
+    dipole = get_dipole_mo(eom, "occ", "vir")
+
+    # solve linear equations A.x = b
+    ieta = 1j*eta
+    omega_list = scan
+    spectrum = np.zeros((3, len(omega_list)), dtype=np.complex)
+
+    # initialize b vector as zeros
+    t1, t2 = eom._cc.t1, eom._cc.t2
+    b_vector = [amplitudes_to_vector_singlet(np.zeros_like(t1), np.zeros_like(t2), kconserv2) for x in range(3)]
+    # fill singles block of b vector
+    nkov = nkpts * nocc * nvir
+    for x in range(3):
+        b_vector[x][:nkov] = dipole[x].reshape(nkov)
+    b_vector = np.asarray(b_vector)
+    b_size = b_vector.shape[1]
+    # get the \phi_0 component of b vector
+    b0 = einsum('xkpp->x', get_dipole_mo(eom, "all", "all"))
+    if any(abs(b0) > 1e-6):
+        logger.warn(eom, 'Large b0 detected! b0 (x,y,z) = {}). Consider adding b0.conj() * x0 contribution \
+                    to spectra'.format(b0))
+
+    diag = eom.get_diag(kshift, imds)
+    if x0 is None:
+        x0 = np.zeros((3, b_size), dtype=np.complex)
+
+    from pyscf.pbc.ci import kcis_rhf
+    counter = kcis_rhf.gmres_counter(rel=True)
+    LinearSolver = scipy.sparse.linalg.gcrotmk
+
+    for i, omega in enumerate(omega_list):
+        matvec = lambda vec: eeccsd_matvec_singlet(eom, vec, kshift, imds=imds) * (-1.) + (omega + ieta) * vec
+        A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=diag.dtype)
+
+        # preconditioner
+        # M is the inverse of P, where P should be close to A, but easy to solve.
+        # We choose P = H_diags shifted by omega + ieta.
+        M = scipy.sparse.diags(np.reciprocal(diag * (-1.) + omega + ieta), format='csc', dtype=diag.dtype)
+
+        for x in range(3):
+
+            sol, info = LinearSolver(A, b_vector[x], x0=x0[x], tol=tol, maxiter=maxiter, M=M, callback=counter)
+            if info == 0:
+                print('Frequency', np.round(omega,3), 'converged in', counter.niter, 'iterations')
+            else:
+                print('Frequency', np.round(omega,3), 'not converged after', counter.niter, 'iterations')
+            counter.reset()
+
+            x0[x] = sol
+            spectrum[x,i] = np.dot(b_vector[x].conj(), sol)
+
+            # Uncomment next 3 lines if b0 is non-negligible
+            # sol0 = b0[x] + np.dot(sol, amplitudes_to_vector_singlet(imds.Fov, imds.woOvV, kconserv2))
+            # sol0 /= omega + ieta
+            # spectrum[x, i] += b0[x].conj()*sol0
+
+    log.timer('EOM-CCSD Spectrum Approx1', *cpu0)
+
+    return -1./np.pi*spectrum.imag, x0
+
+
+def optical_absorption_singlet_approx2(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, imds=None, x0=None,
+                                       partition=None, **kwargs):
+    """Compute approximate spectra assuming:
+            lambda = 0
+
+    Args:
+        eom ([type]): [description]
+        scan ([type]): [description]
+        eta ([type]): [description]
+        kshift (int, optional): [description]. Defaults to 0.
+        tol ([type], optional): [description]. Defaults to 1e-5.
+        maxiter (int, optional): [description]. Defaults to 500.
+        imds ([type], optional): [description]. Defaults to None.
+    """
+    cpu0 = (logger.process_clock(), logger.perf_counter())
+    log = logger.Logger(eom.stdout, eom.verbose)
+
+    if imds is None: imds = eom.make_imds()
+
+    if partition:
+        eom.partition = partition.lower()
+        assert eom.partition in ['mp','full']
+
+    kconserv2 = eom.get_kconserv_ee_r2(kshift)
+
+    # dipole in MO basis
+    # _scf = eom._cc._scf
+    # dipole_ov = get_dipole_mo(_scf, "occ", "vir")
+    # dipole = np.zeros((3, nkpts, nmo, nmo), dtype=dipole_ov.dtype)
+    # dipole[:,:,:nocc,nocc:] = dipole_ov
+    # dipole[:,:,nocc:,:nocc] = dipole_ov.transpose(0,1,3,2).conj()
+
+    dipole = get_dipole_mo(eom, "all", "all")
+
+    # b = <\Phi_{\alpha} | \bar{\dipole} | \Phi_0>
+    # b is needed to solve a.x=b linear equations
+    b0, b_vector = get_effective_dipole_left(eom, dipole, kshift)
+    b_size = b_vector.shape[1]
+    # check the \phi_0 component of b vector
+    print(f"b0 = {b0}")
+    if any(abs(b0) > 1e-6):
+        logger.warn(eom, 'Large b0 detected! b0 (x,y,z) = {}). Consider adding b0.conj() * x0 contribution \
+                    to spectra'.format(b0))
+
+    # solve linear equations A.x = b
+    ieta = 1j*eta
+    omega_list = scan
+    spectrum = np.zeros((3, len(omega_list)), dtype=np.complex)
+
+    diag = eom.get_diag(kshift, imds)
+    if x0 is None:
+        x0 = np.zeros((3, b_size), dtype=b_vector.dtype)
+
+    from pyscf.pbc.ci import kcis_rhf
+    counter = kcis_rhf.gmres_counter(rel=True)
+    LinearSolver = scipy.sparse.linalg.gcrotmk
+
+    for i, omega in enumerate(omega_list):
+        matvec = lambda vec: eeccsd_matvec_singlet(eom, vec, kshift, imds=imds) * (-1.) + (omega + ieta) * vec
+        A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=diag.dtype)
+
+        # preconditioner
+        # M is the inverse of P, where P should be close to A, but easy to solve.
+        # We choose P = H_diags shifted by omega + ieta.
+        M = scipy.sparse.diags(np.reciprocal(diag * (-1.) + omega + ieta), format='csc', dtype=diag.dtype)
+
+        for x in range(3):
+
+            sol, info = LinearSolver(A, b_vector[x], x0=x0[x], tol=tol, maxiter=maxiter, M=M, callback=counter)
+            if info == 0:
+                print('Frequency', np.round(omega,3), 'converged in', counter.niter, 'iterations')
+            else:
+                print('Frequency', np.round(omega,3), 'not converged after', counter.niter, 'iterations')
+            counter.reset()
+
+            x0[x] = sol
+            spectrum[x,i] = np.dot(b_vector[x].conj(), sol)
+
+            sol0 = b0[x] + np.dot(sol, amplitudes_to_vector_singlet(imds.Fov, imds.woOvV, kconserv2))
+            sol0 /= omega + ieta
+            spec0 = b0[x].conj()*sol0
+            logger.debug(eom, 'b0.conj * x0 contribution to spectrum = %.15g', spec0)
+
+            spectrum[x, i] += spec0
+
+    log.timer('EOM-CCSD Spectrum Approx2', *cpu0)
+
+    return -1./np.pi*spectrum.imag, x0
+
+
+def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, eris=None, imds=None, x0=None,
+                               partition=None, **kwargs):
+    """Compute full CCSD spectra.
+
+    Args:
+        eom ([type]): [description]
+        scan ([type]): [description]
+        eta ([type]): [description]
+        kshift (int, optional): [description]. Defaults to 0.
+        tol ([type], optional): [description]. Defaults to 1e-5.
+        maxiter (int, optional): [description]. Defaults to 500.
+        imds ([type], optional): [description]. Defaults to None.
+    """
+    cpu0 = (logger.process_clock(), logger.perf_counter())
+    log = logger.Logger(eom.stdout, eom.verbose)
+
+    if imds is None: imds = eom.make_imds()
+
+    if getattr(eom._cc, "l1", None) is None or getattr(eom._cc, "l2", None) is None:
+        print("Missing lambdas. Computing them now...")
+        eom._cc.solve_lambda(eris=eris, imds=imds)
+
+    if partition:
+        eom.partition = partition.lower()
+        assert eom.partition in ['mp','full']
+
+    kconserv2 = eom.get_kconserv_ee_r2(kshift)
+
+    dipole = get_dipole_mo(eom, "all", "all")
+
+    # b = <\Phi_{\alpha} | \bar{\dipole} | \Phi_0>
+    # b is needed to solve a.x=b linear equations
+    b0, b_vector = get_effective_dipole_left(eom, dipole, kshift)
+    b_size = b_vector.shape[1]
+    # check the \phi_0 component of b vector
+    print(f"b0 = {b0}")
+    if any(abs(b0) > 1e-6):
+        logger.warn(eom, 'Large b0 detected! b0 (x,y,z) = {}). Consider adding b0.conj() * x0 contribution \
+                    to spectra'.format(b0))
+
+    # e = <\Phi_0 | (1+\Lambda) \bar{\dipole^{\dagger}} | \Phi_{\alpha}>
+    e0, e_vector = get_effective_dipole_right(eom, dipole, kshift, ov_oovv=b_vector)
+
+    # solve linear equations A.x = b
+    ieta = 1j*eta
+    omega_list = scan
+    spectrum = np.zeros((3, len(omega_list)), dtype=np.complex)
+
+    diag = eom.get_diag(kshift, imds)
+    if x0 is None:
+        x0 = np.zeros((3, b_size), dtype=b_vector.dtype)
+
+    from pyscf.pbc.ci import kcis_rhf
+    counter = kcis_rhf.gmres_counter(rel=True)
+    LinearSolver = scipy.sparse.linalg.gcrotmk
+
+    for i, omega in enumerate(omega_list):
+        matvec = lambda vec: eeccsd_matvec_singlet(eom, vec, kshift, imds=imds) * (-1.) + (omega + ieta) * vec
+        A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=diag.dtype)
+
+        # preconditioner
+        # M is the inverse of P, where P should be close to A, but easy to solve.
+        # We choose P = H_diags shifted by omega + ieta.
+        M = scipy.sparse.diags(np.reciprocal(diag * (-1.) + omega + ieta), format='csc', dtype=diag.dtype)
+
+        for x in range(3):
+
+            sol, info = LinearSolver(A, b_vector[x], x0=x0[x], tol=tol, maxiter=maxiter, M=M, callback=counter,
+                                     **kwargs)
+            if info == 0:
+                print('Frequency', np.round(omega,3), 'converged in', counter.niter, 'iterations')
+            else:
+                print('Frequency', np.round(omega,3), 'not converged after', counter.niter, 'iterations')
+            counter.reset()
+
+            x0[x] = sol
+            spectrum[x,i] = np.dot(e_vector[x], sol)
+
+            sol0 = b0[x] + np.dot(sol, amplitudes_to_vector_singlet(imds.Fov, imds.woOvV, kconserv2))
+            sol0 /= omega + ieta
+            spec0 = e0[x] * sol0
+            logger.debug(eom, 'b0.conj * x0 contribution to spectrum = %.15g', spec0)
+
+            spectrum[x, i] += spec0
+
+    log.timer('EOM-CCSD Spectrum', *cpu0)
+
+    return -1./np.pi*spectrum.imag, x0
+
+
+def get_dipole_mo(eom, pblock="occ", qblock="vir"):
+    """[summary]
+
+    TODO add kshift argument.
+
+    Args:
+        eom ([type]): [description]
+        pblock (str, optional): 'occ', 'vir', 'all'. Defaults to "occ".
+        qblock (str, optional): 'occ', 'vir', 'all'. Defaults to "vir".
+
+    Returns:
+        np.ndarray: shape (naxis, nkpts, pblock_length, qblock_length)
+    """
+    # TODO figure out why 'cint1e_ipovlp_cart' causes shape mismatch for `ip_ao` and `mo_coeff` when basis='gth-dzvp'.
+    # Meanwhile, let's use 'cint1e_ipovlp_sph' or 'int1e_ipovlp' because they seems to be fine.
+    kpts = eom.kpts
+    nkpts = len(kpts)
+    nocc = eom.nocc
+    nmo = eom.nmo
+    dtype = np.complex
+    scf = eom._cc._scf
+
+    # int1e_ipovlp gives overlap gradients, i.e. d/dr
+    # To get momentum operator, use (-i) * int1e_ipovlp
+    ip_ao = scf.cell.pbc_intor('cint1e_ipovlp_sph', kpts=kpts, comp=3)
+    ip_ao = np.asarray(ip_ao, dtype=dtype).transpose(1,0,2,3)  # with shape (naxis, nkpts, nmo, nmo)
+    ip_ao *= -1j
+
+    # padding mo_coeff and mo_energy
+    mo_coeff = padded_mo_coeff(eom._cc, scf.mo_coeff)
+    mo_energy = padded_mo_energy(eom._cc, scf.mo_energy)
+    # for x in range(3):
+    #     for k in range(nkpts):
+    #         print(f"\naxis:{x}, kpt:{k}, dipole AO diagonals:{ip_ao[x,k].diagonal()}")
+
+    # I.p matrix in MO basis (only the occ-vir block)
+    def get_range(key):
+        if key in ["occ", "all"]:
+            start = 0
+            end = nocc if key == "occ" else nmo
+        elif key == "vir":
+            start = nocc
+            end = nmo
+        return start, end
+    pstart, pend = get_range(pblock)
+    qstart, qend = get_range(qblock)
+    plen = pend - pstart
+    qlen = qend - qstart
+
+    ip_mo = np.empty((3, nkpts, plen, qlen), dtype=mo_coeff[0].dtype)
+    for k in range(nkpts):
+        pmo = mo_coeff[k][:, pstart:pend]
+        qmo = mo_coeff[k][:, qstart:qend]
+        for x in range(3):
+            ip_mo[x, k] = reduce(np.dot, (pmo.T.conj(), ip_ao[x, k], qmo))
+
+    # eia = \epsilon_a - \epsilon_i
+    p_mo_e = [mo_energy[k][pstart:pend] for k in range(nkpts)]
+    q_mo_e = [mo_energy[k][qstart:qend] for k in range(nkpts)]
+
+    epq = np.empty((nkpts, plen, qlen), dtype=mo_energy[0].dtype)
+    for k in range(nkpts):
+        epq[k] = p_mo_e[k][:,None] - q_mo_e[k]
+
+    # dipole in MO basis = -I p(p,q) / (\epsilon_p - \epsison_q)
+    dipole = np.empty((3, nkpts, plen, qlen), dtype=ip_mo.dtype)
+    for x in range(3):
+        #TODO check: should be 1 or -1 * (\epsilon_p - \epsison_q)
+        # dipole[x] = -1. * ip_mo[x] / epq
+        
+        # switch to pure momentum operator (is it the velocity gauge in dipole approximation?)
+        dipole[x] = ip_mo[x]
+    
+    return dipole
+
+
+def get_effective_dipole_left(eom, dipole, kshift=0):
+    """[summary]
+
+    Args:
+        eom ([type]): [description]
+        dipole ([type]): [description]
+        kshift (int, optional): [description]. Defaults to 0.
+
+    Returns:
+        [type]: [description]
+    """
+    cput0 = (logger.process_clock(), logger.perf_counter())
+    log = logger.Logger(eom.stdout, eom.verbose)
+
+    nocc = eom.nocc
+    nmo = eom.nmo
+    nvir = nmo - nocc
+    nkpts = eom.nkpts
+    dtype = dipole.dtype
+    kconserv1 = eom.get_kconserv_ee_r1(kshift)
+    kconserv2 = eom.get_kconserv_ee_r2(kshift)
+
+    # extract different blocks of dipole
+    doo = dipole[:,:,:nocc,:nocc]
+    dov = dipole[:,:,:nocc,nocc:]
+    dvo = dipole[:,:,nocc:,:nocc]
+    dvv = dipole[:,:,nocc:,nocc:]
+
+    t1, t2 = eom._cc.t1, eom._cc.t2
+    mu0 = np.zeros(3, dtype=dtype)
+    mu1 = np.zeros((3, *(t1.shape)), dtype=dtype)
+    mu2 = np.zeros((3, *(t2.shape)), dtype=dtype)
+
+    # mu0 <- d_ii
+    mu0 += einsum('xkpp->x', doo)
+    # mu0 <- 2 d_ia t_ia
+    for ki in range(nkpts):
+        mu0 += 2. * einsum('xia,ia->x', dov[:,ki], t1[ki])
+
+    # mu_ia <- d_ai
+    mu1 += dvo.transpose(0,1,3,2)
+
+    for ki in range(nkpts):
+        # ki - ka = kshift
+        # TODO confirm if (ki - ka) equals kshift or -kshift
+        ka = kconserv1[ki]
+        # mu_ia <- - d_mi t_ma
+        #  km = ka
+        mu1[:,ki] -= einsum('xmi,ma->xia', doo[:,ka], t1[ka])
+        # ma_ia <- d_ac t_ic
+        mu1[:,ki] += einsum('xac,ic->xia', dvv[:,ka], t1[ki])
+        for km in range(nkpts):
+            # mu_ia <- d_me (2 t_imae - t_miae)
+            mu1[:,ki] += 2. * einsum('xme,imae->xia', dov[:,km], t2[ki,km,ka])
+            mu1[:,ki] -= einsum('xme,miae->xia', dov[:,km], t2[km,ki,ka])
+            # mu_ia <- - d_me t_ie t_ma
+            mu1[:,ki] -= einsum('xme,ie,ma->xia', dov[:,km], t1[ki], t1[km])
+
+    # Build imds to avoid Nk^4 step
+    imd_oo = np.zeros_like(doo)
+    imd_vv = np.zeros_like(dvv)
+    for km in range(nkpts):
+        # M_mi = d_me t_ie
+        #  km - ke = kshift, and ki - ke = 0
+        #  => km - ki = kshift
+        ki = kconserv1[km]
+        imd_oo[:, km] += einsum('xme,ie->xmi', dov[:,km], t1[ki])
+        # M_eb = d_me t_mb
+        #  km - ke = kshift
+        ke = kconserv1[km]
+        imd_vv[:, ke] += einsum('xme,mb->xeb', dov[:,km], t1[km])
+
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        # ki + kj - ka - kb = kshift
+        kb = kconserv2[ki, ka, kj]
+
+        # mu_ijab <- - d_mj t_imab
+        #  km - kj = kshift
+        km = kconserv1[kj]
+        mu2[:,ki,kj,ka] -= einsum('xmj,imab->xijab', doo[:,km], t2[ki,km,ka])
+        # mu_ijab <- - d_mi t_jmba
+        #  km - ki = kshift
+        km = kconserv1[ki]
+        mu2[:,ki,kj,ka] -= einsum('xmi,jmba->xijab', doo[:,km], t2[kj,km,kb])
+        # mu_ijab <- d_be t_ijae
+        mu2[:,ki,kj,ka] += einsum('xbe,ijae->xijab', dvv[:,kb], t2[ki,kj,ka])
+        # mu_ijab <- d_ae t_jibe
+        mu2[:,ki,kj,ka] += einsum('xae,jibe->xijab', dvv[:,ka], t2[kj,ki,kb])
+        
+        # mu_ijab <- - d_me t_ie t_mjab
+        #          = - M_mi t_mjab
+        #  km - ki = kshift
+        km = kconserv1[ki]
+        mu2[:,ki,kj,ka] -= einsum('xmi,mjab->xijab', imd_oo[:,km], t2[km,kj,ka])
+
+        # mu_ijab <- - d_me t_je t_miba
+        #          = - M_mj t_miba
+        #  km - kj = kshift
+        km = kconserv1[kj]
+        mu2[:,ki,kj,ka] -= einsum('xmj,miba->xijab', imd_oo[:,km], t2[km,ki,kb])
+
+        # mu_ijab <- - d_me t_mb t_jiea
+        #          = - M_eb t_jiea
+        #  ke - kb = kshift
+        ke = kconserv1[kb]
+        mu2[:,ki,kj,ka] -= einsum('xeb,jiea->xijab', imd_vv[:,ke], t2[kj,ki,ke])
+
+        # mu_ijab <- - d_me t_ma t_ijeb
+        #          = - M_ea t_ijeb
+        #  ke - ka = kshift
+        ke = kconserv1[ka]
+        mu2[:,ki,kj,ka] -= einsum('xea,ijeb->xijab', imd_vv[:,ke], t2[ki,kj,ke])
+
+    result = []
+    for x in range(3):
+        vector = amplitudes_to_vector_singlet(mu1[x], mu2[x], kconserv2)
+        result.append(vector)
+
+    log.timer("left effective dipole components", *cput0)
+
+    return mu0, np.asarray(result)
+
+
+def get_effective_onebody(eom, onebody, kshift=0, ov_oovv=None):
+    cput0 = (logger.process_clock(), logger.perf_counter())
+    log = logger.Logger(eom.stdout, eom.verbose)
+
+    nocc = eom.nocc
+    nmo = eom.nmo
+    nvir = nmo - nocc
+    nkpts = eom.nkpts
+    dtype = onebody.dtype
+    kconserv1 = eom.get_kconserv_ee_r1(kshift)
+    kconserv2 = eom.get_kconserv_ee_r2(kshift)
+
+    # extract different blocks of one-body operator
+    doo = onebody[:,:,:nocc,:nocc]
+    dov = onebody[:,:,:nocc,nocc:]
+    dvo = onebody[:,:,nocc:,:nocc]
+    dvv = onebody[:,:,nocc:,nocc:]
+
+    t1, t2 = eom._cc.t1, eom._cc.t2
+
+    #
+    # effective one-body operator: e^-T O e^T
+    #
+
+    # Dov
+    # D_ia = d_ia
+    Dov = dov.copy()
+
+    # Dvo and Dvvoo
+    Dvo = np.zeros((3, nkpts, nvir, nocc), dtype=dtype)
+    Dvvoo = np.zeros((3, nkpts, nkpts, nkpts, nvir, nvir, nocc, nocc), dtype=dtype)
+    if ov_oovv is None:
+        ov_oovv = get_effective_dipole_left(eom, onebody, kshift)[1]
+    
+    Dov_tmp = np.zeros((3, nkpts, nocc, nvir), dtype=dtype)
+    Doovv_tmp = np.zeros((3, nkpts, nkpts, nkpts, nocc, nocc, nvir, nvir), dtype=dtype)
+    for x in range(3):
+        Dov_tmp[x], Doovv_tmp[x] = vector_to_amplitudes_singlet(ov_oovv[x], nkpts, nmo, nocc, kconserv2)
+    ov_oovv = None
+
+    # Transpose Dov_tmp to get Dvo
+    for ki in range(nkpts):
+        # ki - ka = kshift
+        ka = kconserv1[ki]
+        Dvo[:, ka] = Dov_tmp[:, ki].transpose(0, 2, 1)
+    Dov_tmp = None
+
+    # Transpose Doovv_tmp to get Dvvoo
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        # ki + kj - ka - kb = 0
+        kb = kconserv2[ki, ka, kj]
+        Dvvoo[:, ka, kb, ki] = Doovv_tmp[:, ki, kj, ka].transpose(0, 3, 4, 1, 2)
+    Doovv_tmp = None
+
+    # Doo
+    # D_ij <- d_ij
+    Doo = doo.copy()
+    # D_ij <- d_ie t_je
+    for ki in range(nkpts):
+        # ki - kj = kshift
+        kj = kconserv1[ki]
+        Doo[:, ki] += einsum('xie,je->xij', dov[:, ki], t1[kj])
+
+    # Dvv
+    # D_ab <- d_ab
+    Dvv = dvv.copy()
+    # D_ab <- - d_mb t_ma
+    for ka in range(nkpts):
+        # km - ka = 0
+        km = ka
+        Dvv[:, ka] -= einsum('xmb,ma->xab', dov[:, km], t1[km])
+
+    kconserv_cc = eom._cc.khelper.kconserv
+    # Dvvvo
+    # D_abci = - d_mc t_imba
+    Dvvvo = np.zeros((3, nkpts, nkpts, nkpts, nvir, nvir, nvir, nocc), dtype=dtype)
+    for ka, kb, kc in kpts_helper.loop_kkk(nkpts):
+        # ka + kb - kc - ki = kshift
+        ki = kconserv2[ka, kc, kb]
+        # ki + km - kb - ka = 0
+        #  => kb + ka - ki - km = 0
+        km = kconserv_cc[kb, ki, ka]
+        Dvvvo[:, ka, kb, kc] -= einsum('xmc,imba->xabci', dov[:, km], t2[ki, km, kb])
+
+    # D_ovoo
+    # D_iakj = d_ie t_jkae
+    Dovoo = np.zeros((3, nkpts, nkpts, nkpts, nocc, nvir, nocc, nocc), dtype=dtype)
+    for ki, ka, kk in kpts_helper.loop_kkk(nkpts):
+        # ki + ka - kk - kj = kshift
+        kj = kconserv2[ki, kk, ka]
+        Dovoo[:, ki, ka, kk] += einsum('xie,jkae->iakj', dov[:, ki], t2[kj, kk, ka])
+
+    log.timer("effective one-body operator", *cput0) 
+
+    return Doo, Dvv, Dov, Dvo, Dvvvo, Dovoo, Dvvoo
+
+
+def get_effective_dipole_right(eom, dipole, kshift=0, ov_oovv=None):
+    cput0 = (logger.process_clock(), logger.perf_counter())
+    log = logger.Logger(eom.stdout, eom.verbose)
+
+    nocc = eom.nocc
+    nmo = eom.nmo
+    nvir = nmo - nocc
+    nkpts = eom.nkpts
+    dtype = dipole.dtype
+    kconserv1 = eom.get_kconserv_ee_r1(kshift)
+    kconserv2 = eom.get_kconserv_ee_r2(kshift)
+
+    # adjoint of dipole matrix
+    d_adj = np.zeros((3, nkpts, nmo, nmo), dtype=dtype)
+    # [d_adj]_pq = (d_qp).conj()
+    for kq in range(nkpts):
+        # kq - kp = kshift
+        kp = kconserv1[kq]
+        d_adj[:, kp] = dipole[:, kq].transpose(0, 2, 1).conj()
+
+    # extract different blocks of dipole adjoint
+    doo = d_adj[:,:,:nocc,:nocc]
+    dov = d_adj[:,:,:nocc,nocc:]
+    dvo = d_adj[:,:,nocc:,:nocc]
+    dvv = d_adj[:,:,nocc:,nocc:]
+
+    t1 = eom._cc.t1
+    l1, l2 = eom._cc.l1, eom._cc.l2
+    Doo, Dvv, Dov, Dvo, Dvvvo, Dovoo, Dvvoo = get_effective_onebody(eom, d_adj, kshift, ov_oovv=ov_oovv)
+
+    mu0 = np.zeros(3, dtype=dtype)
+    mu1 = np.zeros((3, *(l1.shape)), dtype=dtype)
+    mu2 = np.zeros((3, *(l2.shape)), dtype=dtype)   
+
+    # mu0
+    for ki in range(nkpts):
+        # mu0 <- 2 d_ia t_ia
+        # TODO Figure this out: ki - ka = 0 orkshift?
+        mu0[:] += 2. * einsum('xia,ia->x', dov[:, ki], t1[ki])
+        # mu0 <- 2 D_ai l_ia
+        #  ki - ka = 0 assuming true for now
+        ka = ki
+        mu0[:] += 2. * einsum('xai,ia->x', Dvo[:, ka], l1[ki])
+
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        # mu0 <- 4 D_abij l_ijab
+        # TODO Figure this out: ki + kj - ka - kb = 0 or kshift?
+        # ki + kj - ka - kb = 0 assuming true for now
+        kb = kconserv2[ki, ka, kj]
+        mu0[:] += 4. * einsum('xabij,ijab->x', Dvvoo[:, ka, kb, ki], l2[ki, kj, ka])
+        # mu0 <- -2 D_abij l_jiab
+        mu0[:] -= 2. * einsum('xabij,jiab->x', Dvvoo[:, ka, kb, ki], l2[kj, ki, ka])
+    
+    # mu_ia <- D_ia
+    mu1 += Dov
+    for ki in range(nkpts):
+        # ki - ka = kshift
+        ka = kconserv1[ki]
+        # mu_ia <- D_ea l_ie
+        #  ki - ke = 0
+        ke = ki
+        mu1[:, ki] += einsum('xea,ie->xia', Dvv[:, ke], l1[ki])
+        # mu_ia <- - D_im l_ma
+        #  ki - km = kshift
+        km = kconserv1[ki]
+        mu1[:, ki] -= einsum('xim,ma->xia', Doo[:, ki], l1[km])
+
+        for ke in range(nkpts):
+            # mu_ia <- 2 D_em l_imae
+            #  ke - km = kshift
+            km = kconserv1[ke]
+            mu1[:, ki] += 2. * einsum('xem,imae->xia', Dvo[:, ke], l2[ki, km, ka])
+            # mu_ia <- - D_em l_miae
+            mu1[:, ki] -= einsum('xem,miae->xia', Dvo[:, ke], l2[km, ki, ka])
+
+            for kf in range(nkpts):
+                # mu_ia <- 2 D_efam l_imef
+                #  ke + kf - ka - km = kshift
+                km = kconserv2[ke, ka, kf]
+                mu1[:, ki] += 2. * einsum('xefam,imef->xia', Dvvvo[:, ke, kf, ka], l2[ki, km, ke])
+                # mu_ia <- - D_efam l_mief
+                mu1[:, ki] -= einsum('xefam,mief->xia', Dvvvo[:, ke, kf, ka], l2[km, ki, ke])
+
+            for km in range(nkpts):
+                # mu_ia <- -2 D_iemn l_mnae
+                #  ki + ke - km - kn = kshift
+                kn = kconserv2[ki, km, ke]
+                mu1[:, ki] -= 2. * einsum('xiemn,mnae->xia', Dovoo[:, ki, ke, km], l2[km, kn, ka])
+                # mu_ia <- D_iemn l_mnea
+                mu1[:, ki] += einsum('xiemn,mnea->xia', Dovoo[:, ki, ke, km], l2[km, kn, ke])
+
+    kconserv_cc = eom._cc.khelper.kconserv
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        # ki + kj - ka - kb = kshift
+        kb = kconserv2[ki, ka, kj]
+        # mu_ijab <- D_ia l_jb
+        mu2[:, ki, kj, ka] += einsum('xia,jb->xijab', Dov[:, ki], l1[kj])
+        # mu_ijab <- D_jb l_ia
+        mu2[:, ki, kj, ka] += einsum('xjb,ia->xijab', Dov[:, kj], l1[ki])
+
+        # mu_ijab <- D_eb l_ijae
+        #  ki + kj - ka - ke = 0
+        ke = kconserv_cc[ki, ka, kj]
+        mu2[:, ki, kj, ka] += einsum('xeb,ijae->xijab', Dvv[:, ke], l2[ki, kj, ka])
+        # mu_ijab <- D_ea l_jibe
+        #  kj + ki - kb - ke = 0
+        ke = kconserv_cc[kj, kb, ki]
+        mu2[:, ki, kj, ka] += einsum('xea,jibe->xijab', Dvv[:, ke], l2[kj, ki, kb])
+        # mu_ijab <- - D_jm l_imab
+        #  kj - km = kshift
+        km = kconserv1[kj]
+        mu2[:, ki, kj, ka] -= einsum('xjm,imab->xijab', Doo[:, kj], l2[ki, km, ka])
+        # mu_ijab <- - D_im l_jmba
+        #  ki - km = kshift
+        km = kconserv1[ki]
+        mu2[:, ki, kj, ka] -= einsum('xim,jmba->xijab', Doo[:, ki], l2[kj, km, kb])
+
+    result = []
+    for x in range(3):
+        vector = amplitudes_to_vector_singlet(mu1[x], mu2[x], kconserv2)
+        result.append(vector)
+
+    log.timer("right effective dipole components", *cput0)
+    return mu0, np.asarray(result)
 
 
 def vector_to_amplitudes_singlet(vector, nkpts, nmo, nocc, kconserv):
@@ -891,6 +1624,7 @@ def vector_to_amplitudes_singlet(vector, nkpts, nmo, nocc, kconserv):
     # r2 indices (old): (k_i, k_a), (k_J), (i, a), (J, B)
     # r2 indices (new): k_i, k_J, k_a, i, J, a, B
     r2 = r2.reshape(nkpts, nkpts, nkpts, nocc, nvir, nocc, nvir).transpose(0,2,1,3,5,4,6)
+
     return [r1, r2]
 
 
@@ -1027,6 +1761,7 @@ def eeccsd_matvec_singlet(eom, vector, kshift, imds=None, diag=None):
         woVvO_bar[wkm, wkb, wke] = 2. * imds.woVvO[wkm, wkb, wke] - imds.woVoV[wkm, wkb, wkj].transpose(0,1,3,2)
 
     Hr1 = np.zeros_like(r1)
+    # 1h1p-1h1p block
     for ki in range(nkpts):
         #  ki - ka = kshift
         ka = kconserv_r1[ki]
@@ -1042,6 +1777,11 @@ def eeccsd_matvec_singlet(eom, vector, kshift, imds=None, diag=None):
             Hr1[ki] += 2. * einsum('maei,me->ia', imds.woVvO[km, ka, ke], r1[km])
             Hr1[ki] -= einsum('maie,me->ia', imds.woVoV[km, ka, ki], r1[km])
 
+    # 1h1p-2h2p block
+    for ki in range(nkpts):
+        #  ki - ka = kshift
+        ka = kconserv_r1[ki]
+        for km in range(nkpts):
             # r_ia <- F_me (2 r_imae - r_miae)
             Hr1[ki] += 2. * einsum('me,imae->ia', imds.Fov[km], r2[ki, km, ka])
             Hr1[ki] -= einsum('me,miae->ia', imds.Fov[km], r2[km, ki, ka])
@@ -1060,20 +1800,10 @@ def eeccsd_matvec_singlet(eom, vector, kshift, imds=None, diag=None):
                 Hr1[ki] += np.einsum('mnie,nmae->ia', imds.woOoV[km, kn, ki], r2[kn, km, ka])
 
     Hr2 = np.zeros_like(r2)
+    # 2h2p-1h1p block
     for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
         # ki + kj - ka - kb = kshift
         kb = kconserv_r2[ki, ka, kj]
-
-        # r_ijab <= - F_mj r_imab
-        #  km = kj
-        Hr2[ki, kj, ka] -= einsum('mj,imab->ijab', imds.Foo[kj], r2[ki, kj, ka])
-        # r_ijab <= - F_mi r_jmba
-        #  km = ki
-        Hr2[ki, kj, ka] -= einsum('mi,jmba->ijab', imds.Foo[ki], r2[kj, ki, kb])
-        # r_ijab <= F_be r_ijae
-        Hr2[ki, kj, ka] += einsum('be,ijae->ijab', imds.Fvv[kb], r2[ki, kj, ka])
-        # r_ijab <= F_ae r_jibe
-        Hr2[ki, kj, ka] += einsum('ae,jibe->ijab', imds.Fvv[ka], r2[kj, ki, kb])
 
         # r_ijab <= W_abej r_ie
         #  ki - ke = kshift
@@ -1094,40 +1824,6 @@ def eeccsd_matvec_singlet(eom, vector, kshift, imds=None, diag=None):
         km = kconserv[ki, ka, kj]
         Hr2[ki, kj, ka] -= einsum('maji,mb->ijab', imds.woVoO[km, ka, kj], r1[km])
 
-        tmp = np.zeros((nocc, nocc, nvir, nvir), dtype=r2.dtype)
-        for km in range(nkpts):
-            # r_ijab <= (2 W_mbej - W_mbje) r_imae - W_mbej r_imea
-            #  km + kb - ke - kj = G
-            ke = kconserv[km, kj, kb]
-            tmp += einsum('mbej,imae->ijab', woVvO_bar[km, kb, ke], r2[ki, km, ka])
-            tmp -= einsum('mbej,imea->ijab', imds.woVvO[km, kb, ke], r2[ki, km, ke])
-            # r_ijab <= - W_maje r_imeb
-            #  km + ka - kj - ke = G
-            ke = kconserv[km, kj, ka]
-            tmp -= einsum('maje,imeb->ijab', imds.woVoV[km, ka, kj], r2[ki, km, ke])
-        Hr2[ki, kj, ka] += tmp
-        # The following two lines can be obtained by simply transposing tmp:
-        #   r_ijab <= (2 W_maei - W_maie) r_jmbe - W_maei r_jmeb
-        #   r_ijab <= - W_mbie r_jmea
-        Hr2[kj, ki, kb] += tmp.transpose(1,0,3,2)
-        tmp = None
-
-        for km in range(nkpts):
-            # r_ijab <= W_abef r_ijef
-            # Rename dummy index km -> ke
-            ke = km
-            Hr2[ki, kj, ka] += einsum('abef,ijef->ijab', imds.wvVvV[ka, kb, ke], r2[ki, kj, ke])
-            # r_ijab <= W_mnij r_mnab
-            #  km + kn - ki - kj = G
-            # => ki - km + kj - kn = G
-            kn = kconserv[ki, km, kj]
-            Hr2[ki, kj, ka] += einsum('mnij,mnab->ijab', imds.woOoO[km, kn, ki], r2[km, kn, ka])
-
-    #
-    # r_ijab <= - W_mnef t_imab (2 r_jnef - r_jnfe)
-    # r_ijab <= - W_mnef t_jmba (2 r_inef - r_infe)
-    # r_ijab <= - W_mnef t_ijae (2 r_mnbf - r_mnfb)
-    # r_ijab <= - W_mnef t_jibe (2 r_mnaf - r_mnfa)
     #
     # r_ijab <= - (2 W_nmie - W_nmei) t_jnba r_me
     # r_ijab <= - (2 W_nmje - W_nmej) t_inab r_me
@@ -1136,28 +1832,9 @@ def eeccsd_matvec_singlet(eom, vector, kshift, imds=None, diag=None):
     #
     # First, build intermediates M = W.r
     #
-    wr2_oo = np.zeros((nkpts, nocc, nocc), dtype=r2.dtype)
-    wr2_vv = np.zeros((nkpts, nvir, nvir), dtype=r2.dtype)
-    wr1_oo = np.zeros_like(wr2_oo)
-    wr1_vv = np.zeros_like(wr2_vv)
+    wr1_oo = np.zeros((nkpts, nocc, nocc), dtype=r2.dtype)
+    wr1_vv = np.zeros((nkpts, nvir, nvir), dtype=r2.dtype)
     for kj in range(nkpts):
-        # Wr2_jm = W_mnef (2 r_jnef - r_jnfe) = W_mnef rbar_jnef
-        #  km + kn - ke - kf = G
-        #  kj + kn - ke - kf = kshift
-        # => kj - km = kshift
-        km = kconserv_r1[kj]
-        # x: kn, y: ke
-        wr2_oo[kj] += einsum('xymnef,xyjnef->jm', imds.woOvV[km], r2bar[kj])
-
-        # Wr2_eb = W_mnef (2 r_mnbf - r_mnfb) = W_mnef rbar_mnbf
-        ke = kj
-        #  km + kn - ke - kf = G
-        #  km + kn - kb - kf = kshift
-        # => ke - kb = kshift
-        kb = kconserv_r1[ke]
-        # x: km, y: kn
-        wr2_vv[ke] += einsum('xymnef,xymnbf->eb', imds.woOvV[:, :, ke], r2bar[:, :, kb])
-
         # Wr1_in = (2 W_nmie - W_nmei) r_me = wbar_nmie r_me
         ki = kj
         #  kn + km - ki - ke = G
@@ -1175,29 +1852,13 @@ def eeccsd_matvec_singlet(eom, vector, kshift, imds=None, diag=None):
         ka = kconserv_r1[kf]
         # x: km
         wr1_vv[kf] += einsum('xamfe,xme->fa', wvOvV_bar[ka, :, kf], r1)
+
     #
     # Second, compute the whole contraction
     #
     for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
         # ki + kj - ka - kb = kshift
         kb = kconserv_r2[ki, ka, kj]
-        # r_ijab <= - Wr2_jm t_imab
-        #  kj - km = kshift
-        km = kconserv_r1[kj]
-        Hr2[ki, kj, ka] -= einsum('jm,imab->ijab', wr2_oo[kj], imds.t2[ki, km, ka])
-        # r_ijab <= - Wr2_im t_jmba
-        #  ki - km = kshift
-        km = kconserv_r1[ki]
-        Hr2[ki, kj, ka] -= einsum('im,jmba->ijab', wr2_oo[ki], imds.t2[kj, km, kb])
-        # r_ijab <= - Wr2_eb t_ijae
-        #  ki + kj - ka - ke = G
-        ke = kconserv[ki, ka, kj]
-        Hr2[ki, kj, ka] -= einsum('eb,ijae->ijab', wr2_vv[ke], imds.t2[ki, kj, ka])
-        # r_ijab <= - Wr2_ea t_jibe
-        #  kj + ki - kb - ke = G
-        ke = kconserv[kj, kb, ki]
-        Hr2[ki, kj, ka] -= einsum('ea,jibe->ijab', wr2_vv[ke], imds.t2[kj, ki, kb])
-
         # r_ijab <= - Wr1_in t_jnba
         #  ki - kn = kshift
         kn = kconserv_r1[ki]
@@ -1214,6 +1875,125 @@ def eeccsd_matvec_singlet(eom, vector, kshift, imds=None, diag=None):
         #  ki + kj - ka - kf = G
         kf = kconserv[ki, ka, kj]
         Hr2[ki, kj, ka] += einsum('fb,ijaf->ijab', wr1_vv[kf], imds.t2[ki, kj, ka])
+
+    # 2h2p-2h2p block
+    if eom.partition == 'mp':
+        fock = imds.eris.fock
+        foo = fock[:, :nocc, :nocc]
+        fvv = fock[:, nocc:, nocc:]
+        for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+            # ki + kj - ka - kb = kshift
+            kb = kconserv_r2[ki, ka, kj]
+            # r_ijab <= - f_mj r_imab
+            #  km = kj
+            Hr2[ki, kj, ka] -= einsum('mj,imab->ijab', foo[kj], r2[ki, kj, ka])
+            # r_ijab <= - f_mi r_jmba
+            #  km = ki
+            Hr2[ki, kj, ka] -= einsum('mi,jmba->ijab', foo[ki], r2[kj, ki, kb])
+            # r_ijab <= f_be r_ijae
+            Hr2[ki, kj, ka] += einsum('be,ijae->ijab', fvv[kb], r2[ki, kj, ka])
+            # r_ijab <= f_ae r_jibe
+            Hr2[ki, kj, ka] += einsum('ae,jibe->ijab', fvv[ka], r2[kj, ki, kb])        
+    elif eom.partition == 'full':
+        if diag is None:
+            diag = eom.get_diag(kshift, imds)
+        diag_2h2p = vector_to_amplitudes_singlet(diag, nkpts, nmo, nocc, kconserv_r2)[1]
+        Hr2 += diag_2h2p * r2
+    else:
+        for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+            # ki + kj - ka - kb = kshift
+            kb = kconserv_r2[ki, ka, kj]
+
+            # r_ijab <= - F_mj r_imab
+            #  km = kj
+            Hr2[ki, kj, ka] -= einsum('mj,imab->ijab', imds.Foo[kj], r2[ki, kj, ka])
+            # r_ijab <= - F_mi r_jmba
+            #  km = ki
+            Hr2[ki, kj, ka] -= einsum('mi,jmba->ijab', imds.Foo[ki], r2[kj, ki, kb])
+            # r_ijab <= F_be r_ijae
+            Hr2[ki, kj, ka] += einsum('be,ijae->ijab', imds.Fvv[kb], r2[ki, kj, ka])
+            # r_ijab <= F_ae r_jibe
+            Hr2[ki, kj, ka] += einsum('ae,jibe->ijab', imds.Fvv[ka], r2[kj, ki, kb])
+
+            tmp = np.zeros((nocc, nocc, nvir, nvir), dtype=r2.dtype)
+            for km in range(nkpts):
+                # r_ijab <= (2 W_mbej - W_mbje) r_imae - W_mbej r_imea
+                #  km + kb - ke - kj = G
+                ke = kconserv[km, kj, kb]
+                tmp += einsum('mbej,imae->ijab', woVvO_bar[km, kb, ke], r2[ki, km, ka])
+                tmp -= einsum('mbej,imea->ijab', imds.woVvO[km, kb, ke], r2[ki, km, ke])
+                # r_ijab <= - W_maje r_imeb
+                #  km + ka - kj - ke = G
+                ke = kconserv[km, kj, ka]
+                tmp -= einsum('maje,imeb->ijab', imds.woVoV[km, ka, kj], r2[ki, km, ke])
+            Hr2[ki, kj, ka] += tmp
+            # The following two lines can be obtained by simply transposing tmp:
+            #   r_ijab <= (2 W_maei - W_maie) r_jmbe - W_maei r_jmeb
+            #   r_ijab <= - W_mbie r_jmea
+            Hr2[kj, ki, kb] += tmp.transpose(1,0,3,2)
+            tmp = None
+
+            for km in range(nkpts):
+                # r_ijab <= W_abef r_ijef
+                # Rename dummy index km -> ke
+                ke = km
+                Hr2[ki, kj, ka] += einsum('abef,ijef->ijab', imds.wvVvV[ka, kb, ke], r2[ki, kj, ke])
+                # r_ijab <= W_mnij r_mnab
+                #  km + kn - ki - kj = G
+                # => ki - km + kj - kn = G
+                kn = kconserv[ki, km, kj]
+                Hr2[ki, kj, ka] += einsum('mnij,mnab->ijab', imds.woOoO[km, kn, ki], r2[km, kn, ka])
+
+        #
+        # r_ijab <= - W_mnef t_imab (2 r_jnef - r_jnfe)
+        # r_ijab <= - W_mnef t_jmba (2 r_inef - r_infe)
+        # r_ijab <= - W_mnef t_ijae (2 r_mnbf - r_mnfb)
+        # r_ijab <= - W_mnef t_jibe (2 r_mnaf - r_mnfa)
+        #
+        # First, build intermediates M = W.r
+        #
+        wr2_oo = np.zeros((nkpts, nocc, nocc), dtype=r2.dtype)
+        wr2_vv = np.zeros((nkpts, nvir, nvir), dtype=r2.dtype)
+        for kj in range(nkpts):
+            # Wr2_jm = W_mnef (2 r_jnef - r_jnfe) = W_mnef rbar_jnef
+            #  km + kn - ke - kf = G
+            #  kj + kn - ke - kf = kshift
+            # => kj - km = kshift
+            km = kconserv_r1[kj]
+            # x: kn, y: ke
+            wr2_oo[kj] += einsum('xymnef,xyjnef->jm', imds.woOvV[km], r2bar[kj])
+
+            # Wr2_eb = W_mnef (2 r_mnbf - r_mnfb) = W_mnef rbar_mnbf
+            ke = kj
+            #  km + kn - ke - kf = G
+            #  km + kn - kb - kf = kshift
+            # => ke - kb = kshift
+            kb = kconserv_r1[ke]
+            # x: km, y: kn
+            wr2_vv[ke] += einsum('xymnef,xymnbf->eb', imds.woOvV[:, :, ke], r2bar[:, :, kb])
+
+        #
+        # Second, compute the whole contraction
+        #
+        for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+            # ki + kj - ka - kb = kshift
+            kb = kconserv_r2[ki, ka, kj]
+            # r_ijab <= - Wr2_jm t_imab
+            #  kj - km = kshift
+            km = kconserv_r1[kj]
+            Hr2[ki, kj, ka] -= einsum('jm,imab->ijab', wr2_oo[kj], imds.t2[ki, km, ka])
+            # r_ijab <= - Wr2_im t_jmba
+            #  ki - km = kshift
+            km = kconserv_r1[ki]
+            Hr2[ki, kj, ka] -= einsum('im,jmba->ijab', wr2_oo[ki], imds.t2[kj, km, kb])
+            # r_ijab <= - Wr2_eb t_ijae
+            #  ki + kj - ka - ke = G
+            ke = kconserv[ki, ka, kj]
+            Hr2[ki, kj, ka] -= einsum('eb,ijae->ijab', wr2_vv[ke], imds.t2[ki, kj, ka])
+            # r_ijab <= - Wr2_ea t_jibe
+            #  kj + ki - kb - ke = G
+            ke = kconserv[kj, kb, ki]
+            Hr2[ki, kj, ka] -= einsum('ea,jibe->ijab', wr2_vv[ke], imds.t2[kj, ki, kb])
 
     cput1 = log.timer_debug1("contraction", *cput1)
     vector = amplitudes_to_vector_singlet(Hr1, Hr2, kconserv_r2)
@@ -1240,9 +2020,15 @@ def eeccsd_diag(eom, kshift=0, imds=None):
         Hr1[ki] -= np.einsum('iaia->ia', imds.woVoV[ki, ka, ki])
 
     Hr2 = np.zeros((nkpts, nkpts, nkpts, nocc, nocc, nvir, nvir), dtype=t1.dtype)
-    # TODO Allow partition='mp'
     if eom.partition == "mp":
-        raise NotImplementedError
+        foo = imds.eris.fock[:, :nocc, :nocc]
+        fvv = imds.eris.fock[:, nocc:, nocc:]
+        for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+            kb = kconserv_r2[ki, ka, kj]
+            Hr2[ki, kj, ka] -= foo[ki].diagonal()[:, None, None, None]
+            Hr2[ki, kj, ka] -= foo[kj].diagonal()[None, :, None, None]
+            Hr2[ki, kj, ka] += fvv[ka].diagonal()[None, None, :, None]
+            Hr2[ki, kj, ka] += fvv[kb].diagonal()[None, None, None, :]
     else:
         for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
             kb = kconserv_r2[ki, ka, kj]
@@ -1428,6 +2214,17 @@ class EOMEESinglet(EOMEE):
     matvec = eeccsd_matvec_singlet
     get_init_guess = get_init_guess_cis
     cis = cis_easy
+    # get_absorption_spectrum = optical_absorption_singlet_approx1
+
+    def get_absorption_spectrum(self, scan, eta, approx=1, **kwargs):
+        if approx == 0:
+            return optical_absorption_singlet(self, scan, eta, **kwargs)
+        elif approx == 1:
+            return optical_absorption_singlet_approx1(self, scan, eta, **kwargs)
+        elif approx == 2:
+            return optical_absorption_singlet_approx2(self, scan, eta, **kwargs)
+        else:
+            raise NotImplementedError("Unknown approximation to CC spectrum")
 
     def vector_size(self, kshift=0):
         '''Size of the linear excitation operator R vector based on spatial
@@ -1491,6 +2288,226 @@ class EOMEESpinFlip(EOMEE):
     def vector_size(self, kshift=0):
         return None
 
+def cvs_eeccsd_matvec_singlet_Hr1(eom, vector, kshift, imds=None):
+    '''A mini version of eeccsd_matvec_singlet(), in the sense that
+    only Hbar.r1 is performed.'''
+
+    if imds is None: imds = eom.make_imds()
+    nkpts = eom.nkpts
+    nocc = eom.nocc
+    nvir = eom.nmo - nocc
+    r1_size = nkpts * nocc * nvir
+    kconserv_r1 = eom.get_kconserv_ee_r1(kshift)
+
+    if len(vector) != r1_size:
+        raise ValueError("vector length mismatch: expected {0}, "
+                         "found {1}".format(r1_size, len(vector)))
+    r1 = vector.reshape(nkpts, nocc, nvir)
+
+    Hr1 = np.zeros_like(r1)
+    for ki in range(nkpts):
+        #  ki - ka = kshift
+        ka = kconserv_r1[ki]
+        # r_ia <- - F_mi r_ma
+        #  km = ki
+        Hr1[ki] -= einsum('mi,ma->ia', imds.Foo[ki], r1[ki])
+        # r_ia <- F_ac r_ic
+        Hr1[ki] += einsum('ac,ic->ia', imds.Fvv[ka], r1[ki])
+        for km in range(nkpts):
+            # r_ia <- (2 W_amie - W_maie) r_me
+            #  km - ke = kshift
+            ke = kconserv_r1[km]
+            Hr1[ki] += 2. * einsum('maei,me->ia', imds.woVvO[km, ka, ke], r1[km])
+            Hr1[ki] -= einsum('maie,me->ia', imds.woVoV[km, ka, ki], r1[km])
+    
+    return Hr1.ravel()
+
+
+def cvs_eeccsd_cis_approx_slow(eom, kshift, nroots=1, imds=None, **kwargs):
+    '''Build initial R vector through diagonalization of <r1|Hbar|r1>
+
+    This method evaluates the matrix elements of Hbar in r1 space in the following way:
+    - 1st col of Hbar = matvec(r1_col1) where r1_col1 = [1, 0, 0, 0, ...]
+    - 2nd col of Hbar = matvec(r1_col2) where r1_col2 = [0, 1, 0, 0, ...]
+    - and so on
+
+    Note that such evaluation has N^3 cost, but error free (because matvec() has been proven correct).
+    '''
+    cput0 = (logger.process_clock(), logger.perf_counter())
+    log = logger.Logger(eom.stdout, eom.verbose)
+
+    if imds is None: imds = eom.make_imds()
+    nkpts, nocc, nvir = imds.t1.shape
+    dtype = imds.t1.dtype
+    
+    r1_size = nkpts * nocc * nvir
+    r1_cvs_size = nkpts * len(eom.mandatory) * nvir
+    r1_col = np.arange(r1_size, dtype=int)
+    r1_col = r1_col.reshape(nkpts, nocc, nvir)
+    r1_col = r1_col[:, eom.mandatory, :].ravel()
+    r1_vecs = np.identity(r1_size, dtype=dtype)
+    
+    H1 = np.zeros([r1_cvs_size, r1_cvs_size], dtype=dtype)
+    for i, col in enumerate(r1_col):
+        vec = r1_vecs[col]
+        full_vec = eeccsd_matvec_singlet_Hr1(eom, vec, kshift, imds=imds)
+        full_vec = full_vec.reshape(nkpts, nocc, nvir)
+        H1[:, i] = full_vec[:, eom.mandatory, :].ravel()
+
+    eigval, eigvec = np.linalg.eig(H1)
+    idx = eigval.argsort()[:nroots]
+    eigval = eigval[idx]
+    eigvec = eigvec[:, idx]
+    r1_expand = np.zeros((r1_size, nroots), dtype=dtype)
+    r1_expand = r1_expand.reshape(nkpts, nocc, nvir, nroots)
+    r1_expand[:, eom.mandatory, :, :] = eigvec.reshape(nkpts, len(eom.mandatory), nvir, nroots)
+    eigvec = r1_expand.reshape(r1_size, nroots)
+    
+    log.timer("EOMEE CIS approx", *cput0)
+
+    return eigval, eigvec
+
+def cvs_eeccsd_matvec_singlet(eom, vector, kshift, imds=None, diag=None):
+    if imds is None: imds = eom.make_imds()
+    nmo = eom.nmo
+    nocc = eom.nocc
+    nvir = nmo - nocc
+    nkpts = eom.nkpts
+    kconserv = eom.get_kconserv_ee_r1(kshift)
+    kconserv_r1 = eom.get_kconserv_ee_r1(kshift)
+    kconserv_r2 = eom.get_kconserv_ee_r2(kshift)
+    vector = eeccsd_matvec_singlet(eom, vector, kshift, imds, diag)
+    Hr1, Hr2 = vector_to_amplitudes_singlet(vector, nkpts, nmo, nocc, kconserv_r2)
+    nonessential = np.delete(np.arange(nocc), eom.mandatory)
+    Hr1[:, nonessential, :] = 0
+    Hr2[:, :, :, nonessential, nonessential[:, np.newaxis], :, :] = 0
+    return amplitudes_to_vector_singlet(Hr1, Hr2, kconserv_r2)
+
+def cvs_optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, eris=None, imds=None, x0=None,
+                               partition=None, **kwargs):
+    """Compute full CCSD spectra.
+
+    Args:
+        eom ([type]): [description]
+        scan ([type]): [description]
+        eta ([type]): [description]
+        kshift (int, optional): [description]. Defaults to 0.
+        tol ([type], optional): [description]. Defaults to 1e-5.
+        maxiter (int, optional): [description]. Defaults to 500.
+        imds ([type], optional): [description]. Defaults to None.
+    """
+    cpu0 = (logger.process_clock(), logger.perf_counter())
+    log = logger.Logger(eom.stdout, eom.verbose)
+
+    if imds is None: imds = eom.make_imds()
+
+    if getattr(eom._cc, "l1", None) is None or getattr(eom._cc, "l2", None) is None:
+        print("Missing lambdas. Computing them now...")
+        eom._cc.solve_lambda(eris=eris, imds=imds)
+
+    if partition:
+        eom.partition = partition.lower()
+        assert eom.partition in ['mp','full']
+
+    kconserv2 = eom.get_kconserv_ee_r2(kshift)
+
+    dipole = get_dipole_mo(eom, "all", "all")
+
+    # b = <\Phi_{\alpha} | \bar{\dipole} | \Phi_0>
+    # b is needed to solve a.x=b linear equations
+    b0, b_vector = get_effective_dipole_left(eom, dipole, kshift)
+    b_size = b_vector.shape[1]
+    # check the \phi_0 component of b vector
+    print(f"b0 = {b0}")
+    if any(abs(b0) > 1e-6):
+        logger.warn(eom, 'Large b0 detected! b0 (x,y,z) = {}). Consider adding b0.conj() * x0 contribution \
+                    to spectra'.format(b0))
+
+    # e = <\Phi_0 | (1+\Lambda) \bar{\dipole^{\dagger}} | \Phi_{\alpha}>
+    e0, e_vector = get_effective_dipole_right(eom, dipole, kshift, ov_oovv=b_vector)
+
+    # solve linear equations A.x = b
+    ieta = 1j*eta
+    omega_list = scan
+    spectrum = np.zeros((3, len(omega_list)), dtype=np.complex)
+
+    diag = eom.get_diag(kshift, imds)
+    if x0 is None:
+        x0 = np.zeros((3, b_size), dtype=b_vector.dtype)
+
+    from pyscf.pbc.ci import kcis_rhf
+    counter = kcis_rhf.gmres_counter(rel=True)
+    LinearSolver = scipy.sparse.linalg.gcrotmk
+
+    for i, omega in enumerate(omega_list):
+        matvec = lambda vec: cvs_eeccsd_matvec_singlet(eom, vec, kshift, imds=imds) * (-1.) + (omega + ieta) * vec
+        A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=diag.dtype)
+
+        # preconditioner
+        # M is the inverse of P, where P should be close to A, but easy to solve.
+        # We choose P = H_diags shifted by omega + ieta.
+        M = scipy.sparse.diags(np.reciprocal(diag * (-1.) + omega + ieta), format='csc', dtype=diag.dtype)
+
+        for x in range(3):
+
+            sol, info = LinearSolver(A, b_vector[x], x0=x0[x], tol=tol, maxiter=maxiter, M=M, callback=counter,
+                                     **kwargs)
+            if info == 0:
+                print('Frequency', np.round(omega,3), 'converged in', counter.niter, 'iterations')
+            else:
+                print('Frequency', np.round(omega,3), 'not converged after', counter.niter, 'iterations')
+            counter.reset()
+
+            x0[x] = sol
+            spectrum[x,i] = np.dot(e_vector[x], sol)
+
+            sol0 = b0[x] + np.dot(sol, amplitudes_to_vector_singlet(imds.Fov, imds.woOvV, kconserv2))
+            sol0 /= omega + ieta
+            spec0 = e0[x] * sol0
+            logger.debug(eom, 'b0.conj * x0 contribution to spectrum = %.15g', spec0)
+
+            spectrum[x, i] += spec0
+
+    log.timer('EOM-CCSD Spectrum', *cpu0)
+
+    return -1./np.pi*spectrum.imag, x0
+
+class CVSEOMEESinglet(EOMEESinglet):
+    def __init__(self, cc):
+        EOMEESinglet.__init__(self, cc)
+        mandatory = list(range(cc.nocc))
+
+    matvec = cvs_eeccsd_matvec_singlet
+    
+    def get_init_guess(eom, kshift, nroots=1, imds=None, **kwargs):
+        '''Build initial R vector through diagonalization of <r1|Hbar|r1>
+
+        Check eeccsd_cis_approx_slow() for details.
+        '''
+        if imds is None: imds = eom.make_imds()
+        nkpts, nocc, nvir = imds.t1.shape
+        dtype = imds.t1.dtype
+        r1_size = nkpts * nocc * nvir
+        vector_size = eom.vector_size(kshift)
+
+        eigval, eigvec = cvs_eeccsd_cis_approx_slow(eom, kshift, nroots, imds)
+        guess = []
+        for i in range(nroots):
+            g = np.zeros(int(vector_size), dtype=dtype)
+            g[:r1_size] = eigvec[:, i]
+            guess.append(g)
+
+        return guess
+
+    def get_absorption_spectrum(self, scan, eta, approx=0, **kwargs):
+        if approx == 0:
+            return cvs_optical_absorption_singlet(self, scan, eta, **kwargs)
+        elif approx == 1:
+            return optical_absorption_singlet_approx1(self, scan, eta, **kwargs)
+        elif approx == 2:
+            return optical_absorption_singlet_approx2(self, scan, eta, **kwargs)
+        else:
+            raise NotImplementedError("Unknown approximation to CC spectrum")
 
 imd = imdk
 
@@ -1663,11 +2680,28 @@ class _IMDS:
         logger.timer_debug1(self, 'EOM-CCSD(T)a IP/EA intermediates', *cput0)
         return self
 
-    def make_ee(self, ee_partition=None):
+    def make_ee(self, ee_partition=None, part=None):
+        required_parts = ["shared", "ip", "ea"]
+        if part is None:
+            part = required_parts
+        else:
+            if not (isinstance(part, (list, tuple)) and np.all([key in required_parts for key in part])):
+                raise ValueError("kwarg `part` can only be list/tuple of 'shared', 'ip', 'ea'")
+            print(f"\nComputing following parts: {part}")
+
         self._make_shared_1e()
-        if self._made_shared_2e is False:
-            self._make_shared_2e()
-            self._made_shared_2e = True
+        # Rename imds to match the notations in pyscf.cc.eom_rccsd
+        self.Foo = self.Loo
+        self.Fvv = self.Lvv
+
+        if "shared" in part:
+            if self._made_shared_2e is False:
+                self._make_shared_2e()
+                self._made_shared_2e = True
+            # Rename imds to match the notations in pyscf.cc.eom_rccsd
+            self.woOvV = self.Woovv
+            self.woVvO = self.Wovvo
+            self.woVoV = self.Wovov
 
         cput0 = (logger.process_clock(), logger.perf_counter())
         log = logger.Logger(self.stdout, self.verbose)
@@ -1675,34 +2709,30 @@ class _IMDS:
         t1, t2, eris = self.t1, self.t2, self.eris
         kconserv = self.kconserv
 
-        # Rename imds to match the notations in pyscf.cc.eom_rccsd
-        self.Foo = self.Loo
-        self.Fvv = self.Lvv
-        self.woOvV = self.Woovv
-        self.woVvO = self.Wovvo
-        self.woVoV = self.Wovov
+        if "ip" in part:
+            if not self.made_ip_imds:
+                # 0 or 1 virtuals
+                self.woOoO = imd.Woooo(t1, t2, eris, kconserv)
+                self.woOoV = imd.Wooov(t1, t2, eris, kconserv)
+                self.woVoO = imd.Wovoo(t1, t2, eris, kconserv)
+            else:
+                self.woOoO = self.Woooo
+                self.woOoV = self.Wooov
+                self.woVoO = self.Wovoo
 
-        if not self.made_ip_imds:
-            # 0 or 1 virtuals
-            self.woOoO = imd.Woooo(t1, t2, eris, kconserv)
-            self.woOoV = imd.Wooov(t1, t2, eris, kconserv)
-            self.woVoO = imd.Wovoo(t1, t2, eris, kconserv)
-        else:
-            self.woOoO = self.Woooo
-            self.woOoV = self.Wooov
-            self.woVoO = self.Wovoo
+        if "ea" in part:
+            if not self.made_ea_imds:
+                # 3 or 4 virtuals
+                self.wvOvV = imd.Wvovv(t1, t2, eris, kconserv)
+                self.wvVvV = imd.Wvvvv(t1, t2, eris, kconserv)
+                self.wvVvO = imd.Wvvvo(t1, t2, eris, kconserv, self.wvVvV)
+            else:
+                self.wvOvV = self.Wvovv
+                self.wvVvV = self.Wvvvv
+                self.wvVvO = self.Wvvvo
 
-        if not self.made_ea_imds:
-            # 3 or 4 virtuals
-            self.wvOvV = imd.Wvovv(t1, t2, eris, kconserv)
-            self.wvVvV = imd.Wvvvv(t1, t2, eris, kconserv)
-            self.wvVvO = imd.Wvvvo(t1, t2, eris, kconserv, self.wvVvV)
-        else:
-            self.wvOvV = self.Wvovv
-            self.wvVvV = self.Wvvvv
-            self.wvVvO = self.Wvvvo
-
-        self.made_ee_imds = True
+        if part == required_parts:
+            self.made_ee_imds = True
         log.timer('EOM-CCSD EE intermediates', *cput0)
 
     def get_Wvvvv(self, ka, kb, kc):

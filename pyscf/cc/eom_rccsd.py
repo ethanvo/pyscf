@@ -86,8 +86,8 @@ def kernel(eom, nroots=1, koopmans=False, guess=None, left=False,
             else: # for EOM-UCCSD
                 r1 = np.hstack([x.ravel() for x in r1])
                 qp_weight = np.linalg.norm(r1)**2
-            logger.info(eom, 'EOM-CCSD root %d E = %.16g  qpwt = %.6g  conv = %s',
-                        n, en, qp_weight, convn)
+            logger.info(eom, 'EOM-CCSD root %d E = %.16g  qpwt = %.6g  conv = %s vector = %s',
+                        n, en, qp_weight, convn, vn)
         log.timer('EOM-CCSD', *cput0)
     if nroots == 1:
         return conv[0], es[0].real, vs[0]
@@ -324,8 +324,9 @@ def ipccsd_matvec(eom, vector, imds=None, diag=None):
         tmp = 2*np.einsum('lkdc,kld->c', imds.Woovv, r2)
         tmp += -np.einsum('kldc,kld->c', imds.Woovv, r2)
         Hr2 += -np.einsum('c,ijcb->ijb', tmp, imds.t2)
-
+        
     vector = eom.amplitudes_to_vector(Hr1, Hr2)
+    
     return vector
 
 def lipccsd_matvec(eom, vector, imds=None, diag=None):
@@ -594,6 +595,44 @@ class EOMIP_Ta(EOMIP):
         imds = _IMDS(self._cc, eris=eris)
         imds.make_t3p2_ip(self._cc, self.partition)
         return imds
+
+########################################
+# CVS-EOM-IP-CCSD
+########################################
+
+class CVSEOMIP(EOMIP):
+    def __init__(self, cc):
+        EOMIP.__init__(self, cc)
+        mandatory = list(range(cc.nocc))
+
+    def matvec(eom, vector, imds=None, diag=None):
+        dtype = np.result_type(vector)
+        nmo = eom.nmo
+        nocc = eom.nocc
+        nonessential = np.delete(np.arange(nocc), eom.mandatory)
+        input_vec = vector.copy()
+        vec1, vec2 = vector_to_amplitudes_ip(input_vec, nmo, nocc)
+        e_shift1 = np.zeros_like(vec1)
+        e_shift2 = np.zeros_like(vec2)
+        e_shift1[nonessential] = vec1[nonessential] * 10.0e15
+        e_shift2[nonessential, nonessential[:, np.newaxis], :] = vec2[nonessential, nonessential[:, np.newaxis], :] * 10.0e15
+        e_shift = amplitudes_to_vector_ip(e_shift1, e_shift2)
+        vector = ipccsd_matvec(eom, vector, imds, diag)
+        vector += e_shift
+
+        return vector
+
+    def get_diag(eom, imds=None):
+        nmo = eom.nmo
+        nocc = eom.nocc
+        nonessential = np.delete(np.arange(nocc), eom.mandatory)
+        vector = ipccsd_diag(eom, imds)
+        Hr1, Hr2 = vector_to_amplitudes_ip(vector, nmo, nocc)
+        Hr1[nonessential] += 10.0e15
+        Hr2[nonessential, nonessential[:, np.newaxis], :] += 10.0e15
+        vector = amplitudes_to_vector_ip(Hr1, Hr2)
+
+        return vector
 
 ########################################
 # EOM-EA-CCSD
@@ -1727,6 +1766,40 @@ class EOMEESinglet(EOMEE):
         nov = nocc * nvir
         return nov + nov*(nov+1)//2
 
+class CVSEOMEESinglet(EOMEESinglet):
+    def __init__(self, cc):
+        EOMEESinglet.__init__(self, cc)
+        mandatory = list(range(cc.nocc))
+
+    def matvec(eom, vector, imds=None):
+        dtype = np.result_type(vector)
+        nmo = eom.nmo
+        nocc = eom.nocc
+        nonessential = np.delete(np.arange(nocc), eom.mandatory)
+        input_vec = vector.copy()
+        vec1, vec2 = vector_to_amplitudes_singlet(vector, nmo, nocc)
+        e_shift1 = np.zeros_like(vec1)
+        e_shift2 = np.zeros_like(vec2)
+        e_shift1[nonessential, :] = vec1[nonessential] * 10.0e15
+        e_shift2[nonessential, nonessential[:, np.newaxis], :, :] = vec2[nonessential, nonessential[:, np.newaxis], :, :] * 10.0e15
+        e_shift = amplitudes_to_vector_singlet(e_shift1, e_shift2)
+        vector = eeccsd_matvec_singlet(eom, vector, imds)
+        vector += e_shift
+
+        return vector
+
+    def get_diag(eom, imds=None):
+        nmo = eom.nmo
+        nocc = eom.nocc
+        nonessential = np.delete(np.arange(nocc), eom.mandatory)
+        vec_eeS, vec_eeT, vec_sf = eeccsd_diag(eom, imds)
+        Hr1, Hr2 = vector_to_amplitudes_singlet(vec_eeS, nmo, nocc)
+        Hr1[nonessential, :] += 10e15
+        Hr2[nonessential, nonessential[:, np.newaxis], :, :] += 10.0e15
+        vec_eeS = amplitudes_to_vector_singlet(Hr1, Hr2)
+
+        return vec_eeS, vec_eeT, vec_sf
+
 
 class EOMEETriplet(EOMEE):
     kernel = eomee_ccsd_triplet
@@ -2100,3 +2173,157 @@ def _make_tau(t2, t1, r1, fac=1, out=None):
     tau *= fac * .5
     tau += t2
     return tau
+    
+def _cp(a):
+    return np.array(a, copy=False, order='C')
+
+if __name__ == '__main__':
+    from pyscf import scf
+    from pyscf import gto
+    from pyscf.cc import rccsd
+
+    mol = gto.Mole()
+    mol.atom = [
+        [8 , (0. , 0.     , 0.)],
+        [1 , (0. , -0.757 , 0.587)],
+        [1 , (0. , 0.757  , 0.587)]]
+    mol.basis = 'cc-pvdz'
+    mol.verbose = 0
+    mol.spin = 0
+    mol.build()
+    mf = scf.RHF(mol).run(conv_tol=1e-14)
+
+    mycc = rccsd.RCCSD(mf)
+    ecc, t1, t2 = mycc.kernel()
+    print(ecc - -0.21334326214236796)
+
+    myeom = EOMIP(mycc)
+    print("IP energies... (right eigenvector)")
+    e,v = ipccsd(myeom, nroots=3)
+    print(e[0] - 0.43356041409195489)
+    print(e[1] - 0.51876598058509493)
+    print(e[2] - 0.6782879569941862 )
+
+    print("IP energies... (left eigenvector)")
+    le,lv = ipccsd(myeom, nroots=3,left=True)
+    print(le[0] - 0.43356040428879794)
+    print(le[1] - 0.51876597800180335)
+    print(le[2] - 0.67828755013874864)
+
+    e = myeom.ipccsd_star_contract(e, v, lv)
+    print(e[0] - 0.43793202073189047)
+    print(e[1] - 0.52287073446559729)
+    print(e[2] - 0.67994597948852287)
+
+    myeom = EOMEA(mycc)
+    print("EA energies... (right eigenvector)")
+    e,v = eaccsd(myeom, nroots=3)
+    print(e[0] - 0.16737886282063008)
+    print(e[1] - 0.24027622989542635)
+    print(e[2] - 0.51006796667905585)
+
+    print("EA energies... (left eigenvector)")
+    le,lv = eaccsd(myeom, nroots=3, left=True)
+    print(le[0] - 0.16737896537079733)
+    print(le[1] - 0.24027634198123343)
+    print(le[2] - 0.51006809015066612)
+
+    e = myeom.eaccsd_star_contract(e,v,lv)
+    print(e[0] - 0.16656250953550664)
+    print(e[1] - 0.23944144521387614)
+    print(e[2] - 0.41399436888830721)
+
+    myeom = EOMEESpinFlip(mycc)
+    np.random.seed(1)
+    v = np.random.random(myeom.vector_size())
+    r1, r2 = vector_to_amplitudes_eomsf(v, myeom.nmo, myeom.nocc)
+    print(lib.finger(r1)    - 0.017703197938757409)
+    print(lib.finger(r2[0]) --21.605764517401415)
+    print(lib.finger(r2[1]) - 6.5857056438834842)
+    print(abs(amplitudes_to_vector_eomsf(r1, r2) - v).max())
+
+    myeom = EOMEE(mycc)
+    e,v = myeom.eeccsd(nroots=1)
+    print(e - 0.2757159395886167)
+
+    e,v = myeom.eeccsd(nroots=4)
+    print(e[0] - 0.2757159395886167)
+    print(e[1] - 0.2757159395886167)
+    print(e[2] - 0.2757159395886167)
+    print(e[3] - 0.3005716731825082)
+
+    e,v = myeom.eeccsd(nroots=4, koopmans=True)
+    print(e[0] - 0.2757159395886167)
+    print(e[1] - 0.2757159395886167)
+    print(e[2] - 0.2757159395886167)
+    print(e[3] - 0.3005716731825082)
+
+    e,v = myeom.eeccsd(nroots=4, guess=v[:4])
+    print(e[0] - 0.2757159395886167)
+    print(e[1] - 0.2757159395886167)
+    print(e[2] - 0.2757159395886167)
+    print(e[3] - 0.3005716731825082)
+
+
+    mycc = ccsd.CCSD(mf)
+    ecc, t1, t2 = mycc.kernel()
+    print(ecc - -0.21334326214236796)
+
+    myeom = EOMIP(mycc)
+    print("IP energies... (right eigenvector)")
+    e,v = ipccsd(myeom, nroots=3)
+    print(e[0] - 0.43356041409195489)
+    print(e[1] - 0.51876598058509493)
+    print(e[2] - 0.6782879569941862 )
+
+    print("IP energies... (left eigenvector)")
+    le,lv = ipccsd(myeom, nroots=3,left=True)
+    print(le[0] - 0.43356040428879794)
+    print(le[1] - 0.51876597800180335)
+    print(le[2] - 0.67828755013874864)
+
+    e = myeom.ipccsd_star_contract(e, v, lv)
+    print(e[0] - 0.43793202073189047)
+    print(e[1] - 0.52287073446559729)
+    print(e[2] - 0.67994597948852287)
+
+    myeom = EOMEA(mycc)
+    print("EA energies... (right eigenvector)")
+    e,v = eaccsd(myeom, nroots=3)
+    print(e[0] - 0.16737886282063008)
+    print(e[1] - 0.24027622989542635)
+    print(e[2] - 0.51006796667905585)
+
+    print("EA energies... (left eigenvector)")
+    le,lv = eaccsd(myeom, nroots=3, left=True)
+    print(le[0] - 0.16737896537079733)
+    print(le[1] - 0.24027634198123343)
+    print(le[2] - 0.51006809015066612)
+
+    e = myeom.eaccsd_star_contract(e,v,lv)
+    print(e[0] - 0.16656250953550664)
+    print(e[1] - 0.23944144521387614)
+    print(e[2] - 0.41399436888830721)
+
+    myeom = EOMEE(mycc)
+    e,v = myeom.eeccsd(nroots=1)
+    print(e - 0.2757159395886167)
+
+    e,v = myeom.eeccsd(nroots=4)
+    print(e[0] - 0.2757159395886167)
+    print(e[1] - 0.2757159395886167)
+    print(e[2] - 0.2757159395886167)
+    print(e[3] - 0.3005716731825082)
+
+    e,v = myeom.eeccsd(nroots=4, koopmans=True)
+    print(e[0] - 0.2757159395886167)
+    print(e[1] - 0.2757159395886167)
+    print(e[2] - 0.2757159395886167)
+    print(e[3] - 0.3005716731825082)
+
+    e,v = myeom.eeccsd(nroots=4, guess=v[:4])
+    print(e[0] - 0.2757159395886167)
+    print(e[1] - 0.2757159395886167)
+    print(e[2] - 0.2757159395886167)
+    print(e[3] - 0.3005716731825082)
+
