@@ -102,11 +102,10 @@ class KnownValues(unittest.TestCase):
         # decrease the convergence tolerance. Otherwise the davidson solver
         # may produce vectors that break the symmetry required by direct_spin0.
         nelec = (5,5)
-        fci.addons.fix_spin_(fci.direct_spin0)
+        fci.addons.fix_spin_(fci.direct_spin0, shift=0.02)
         na = fci.cistring.num_strings(norb, nelec[0])
         c0 = numpy.zeros((na,na))
         c0[0,0] = 1
-        c0[-1,-1] = 1e-4
         e, ci0 = fci.direct_spin0.kernel(h1, h2, norb, nelec, ci0=c0,
                                          conv_tol=1e-8)
 
@@ -124,8 +123,8 @@ class KnownValues(unittest.TestCase):
         ci0 /= numpy.linalg.norm(ci0)
         dm2baab = fci.spin_op.make_rdm2_baab(ci0, norb, nelec)
         dm2abba = fci.spin_op.make_rdm2_abba(ci0, norb, nelec)
-        self.assertAlmostEqual(lib.finger(dm2baab), -0.04113790921902272, 12)
-        self.assertAlmostEqual(lib.finger(dm2abba), -0.10910630874863614, 12)
+        self.assertAlmostEqual(lib.fp(dm2baab), -0.04113790921902272, 12)
+        self.assertAlmostEqual(lib.fp(dm2abba), -0.10910630874863614, 12)
 
         dm2ab = fci.direct_spin1.make_rdm12s(ci0, norb, nelec)[1][1]
         self.assertAlmostEqual(abs(dm2baab - -dm2ab.transpose(2,1,0,3)).max(), 0, 12)
@@ -172,7 +171,3 @@ class KnownValues(unittest.TestCase):
 if __name__ == "__main__":
     print("Full Tests for fci.spin_op")
     unittest.main()
-
-
-
-

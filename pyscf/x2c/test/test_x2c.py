@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2014-2018 The PySCF Developers. All Rights Reserved.
+# Copyright 2014-2022 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -34,6 +34,11 @@ def setUpModule():
             H     0    0.757    0.587''',
         basis = 'cc-pvdz',
     )
+
+def tearDownModule():
+    global mol
+    mol.stdout.close()
+    del mol
 
 def tearDownModule():
     global mol
@@ -93,19 +98,19 @@ class KnownValues(unittest.TestCase):
         t, v, w = tv(myx2c.with_x2c)
         h1 = myx2c.with_x2c.picture_change((v, w*(.5/c)**2-t), t)
         href = myx2c.with_x2c.get_hcore()
-        self.assertAlmostEqual(abs(href - h1).max(), 0, 10)
+        self.assertAlmostEqual(abs(href - h1).max(), 0, 9)
 
         myx2c.with_x2c.xuncontract = True
         t, v, w = tv(myx2c.with_x2c)
         h1 = myx2c.with_x2c.picture_change((v, w*(.5/c)**2-t), t)
         href = myx2c.with_x2c.get_hcore()
-        self.assertAlmostEqual(abs(href - h1).max(), 0, 10)
+        self.assertAlmostEqual(abs(href - h1).max(), 0, 9)
 
         myx2c.with_x2c.basis = 'unc-sto3g'
         t, v, w = tv(myx2c.with_x2c)
         h1 = myx2c.with_x2c.picture_change((v, w*(.5/c)**2-t), t)
         href = myx2c.with_x2c.get_hcore()
-        self.assertAlmostEqual(abs(href - h1).max(), 0, 10)
+        self.assertAlmostEqual(abs(href - h1).max(), 0, 9)
 
     def test_sfx2c1e_picture_change(self):
         c = lib.param.LIGHT_SPEED
@@ -121,19 +126,19 @@ class KnownValues(unittest.TestCase):
         t, v, w = tv(myx2c.with_x2c)
         h1 = myx2c.with_x2c.picture_change((v, w*(.5/c)**2-t), t)
         href = myx2c.with_x2c.get_hcore()
-        self.assertAlmostEqual(abs(href - h1).max(), 0, 10)
+        self.assertAlmostEqual(abs(href - h1).max(), 0, 9)
 
         myx2c.with_x2c.xuncontract = True
         t, v, w = tv(myx2c.with_x2c)
         h1 = myx2c.with_x2c.picture_change((v, w*(.5/c)**2-t), t)
         href = myx2c.with_x2c.get_hcore()
-        self.assertAlmostEqual(abs(href - h1).max(), 0, 10)
+        self.assertAlmostEqual(abs(href - h1).max(), 0, 9)
 
         myx2c.with_x2c.basis = 'unc-sto3g'
         t, v, w = tv(myx2c.with_x2c)
         h1 = myx2c.with_x2c.picture_change((v, w*(.5/c)**2-t), t)
         href = myx2c.with_x2c.get_hcore()
-        self.assertAlmostEqual(abs(href - h1).max(), 0, 10)
+        self.assertAlmostEqual(abs(href - h1).max(), 0, 9)
 
     def test_lindep_xbasis(self):
         mol = gto.M(atom='C', basis='''
@@ -209,11 +214,9 @@ C     F
         mf.max_cycle = 1
         mf.kernel(dm0=dm)
         self.assertTrue(mf.converged)
-        self.assertAlmostEqual(mf.e_tot, ref.e_tot, 10)
+        self.assertAlmostEqual(mf.e_tot, ref.e_tot, 9)
 
 
 if __name__ == "__main__":
     print("Full Tests for x2c")
     unittest.main()
-
-

@@ -32,7 +32,7 @@ class SymAdaptedCASSCF(mc1step.CASSCF):
     def __init__(self, mf_or_mol, ncas, nelecas, ncore=None, frozen=None):
         mc1step.CASSCF.__init__(self, mf_or_mol, ncas, nelecas, ncore, frozen)
 
-        assert(self.mol.symmetry)
+        assert (self.mol.symmetry)
         fcisolver = self.fcisolver
         if isinstance(fcisolver, fci.direct_spin0.FCISolver):
             self.fcisolver = fci.direct_spin0_symm.FCISolver(self.mol)
@@ -71,7 +71,7 @@ class SymAdaptedCASSCF(mc1step.CASSCF):
                 _kern(self, mo_coeff,
                       tol=self.conv_tol, conv_tol_grad=self.conv_tol_grad,
                       ci0=ci0, callback=callback, verbose=self.verbose)
-        log.note('CASSCF energy = %.15g', self.e_tot)
+        log.note('CASSCF energy = %#.15g', self.e_tot)
         self._finalize()
         return self.e_tot, self.e_cas, self.ci, self.mo_coeff, self.mo_energy
 
