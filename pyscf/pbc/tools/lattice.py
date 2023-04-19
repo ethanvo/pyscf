@@ -18,7 +18,8 @@ def get_ase_atom(formula):
     formula = formula.lower()
     assert formula in ['lih','lif','licl','mgo',
                        'c','si','ge','sic','gaas','gan','cds',
-                       'zns','zno','bn','alp','bp','aln','mgs']
+                       'zns','zno','bn','alp','bp','aln','mgs',
+                       'vo', 'mno', 'feo']
     if formula == 'lih':
         ase_atom = get_ase_rocksalt('Li','H')
     elif formula == 'lif':
@@ -55,6 +56,12 @@ def get_ase_atom(formula):
         ase_atom = get_ase_wurtzite('Al','N')
     elif formula == 'mgs':
         ase_atom = get_ase_rocksalt('Mg','S')
+    elif formula == 'vo':
+        ase_atom = get_ase_rocksalt('V','O')
+    elif formula == 'mno':
+        ase_atom = get_ase_rocksalt('Mn','O')
+    elif formula == 'feo':
+        ase_atom = get_ase_rocksalt('Fe','O')
 
     return ase_atom
 
@@ -118,7 +125,7 @@ def get_ase_zincblende(A='Ga', B='As'):
     return ase_atom
 
 def get_ase_rocksalt(A='Li', B='Cl'):
-    assert A in ['Li', 'Mg']
+    assert A in ['Li', 'Mg', 'V', 'Mn', 'Fe']
     # Add Na, K
     assert B in ['H', 'F', 'Cl', 'O', 'S']
     # Add Br, I
@@ -134,6 +141,12 @@ def get_ase_rocksalt(A='Li', B='Cl'):
         ase_atom = bulk('MgO', 'rocksalt', a=4.213*A2B)
     elif A=='Mg' and B=='S':
         ase_atom = bulk('MgS', 'rocksalt', a=5.191*A2B)
+    elif A=='V' and B=='O':
+        ase_atom = bulk('VO', 'rocksalt', a=4.1003*A2B)
+    elif A=='Mn' and B=='O':
+        ase_atom = bulk('MnO', 'rocksalt', a=4.444*A2B)
+    elif A=='Fe' and B=='O':
+        ase_atom = bulk('FeO', 'rocksalt', a=4.308*A2B)
     else:
         raise NotImplementedError('No formula found for system %s %s. '
                                   'Choose a different system?  Or add it to the list!' % (A, B))

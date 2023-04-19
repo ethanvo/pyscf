@@ -2286,41 +2286,6 @@ class EOMEESpinFlip(EOMEE):
     def vector_size(self, kshift=0):
         return None
 
-def cvs_eeccsd_matvec_singlet_Hr1(eom, vector, kshift, imds=None):
-    '''A mini version of eeccsd_matvec_singlet(), in the sense that
-    only Hbar.r1 is performed.'''
-
-    if imds is None: imds = eom.make_imds()
-    nkpts = eom.nkpts
-    nocc = eom.nocc
-    nvir = eom.nmo - nocc
-    r1_size = nkpts * nocc * nvir
-    kconserv_r1 = eom.get_kconserv_ee_r1(kshift)
-
-    if len(vector) != r1_size:
-        raise ValueError("vector length mismatch: expected {0}, "
-                         "found {1}".format(r1_size, len(vector)))
-    r1 = vector.reshape(nkpts, nocc, nvir)
-
-    Hr1 = np.zeros_like(r1)
-    for ki in range(nkpts):
-        #  ki - ka = kshift
-        ka = kconserv_r1[ki]
-        # r_ia <- - F_mi r_ma
-        #  km = ki
-        Hr1[ki] -= einsum('mi,ma->ia', imds.Foo[ki], r1[ki])
-        # r_ia <- F_ac r_ic
-        Hr1[ki] += einsum('ac,ic->ia', imds.Fvv[ka], r1[ki])
-        for km in range(nkpts):
-            # r_ia <- (2 W_amie - W_maie) r_me
-            #  km - ke = kshift
-            ke = kconserv_r1[km]
-            Hr1[ki] += 2. * einsum('maei,me->ia', imds.woVvO[km, ka, ke], r1[km])
-            Hr1[ki] -= einsum('maie,me->ia', imds.woVoV[km, ka, ki], r1[km])
-    
-    return Hr1.ravel()
-
-
 def cvs_eeccsd_cis_approx_slow(eom, kshift, nroots=1, imds=None, **kwargs):
     '''Build initial R vector through diagonalization of <r1|Hbar|r1>
 
@@ -2365,118 +2330,40 @@ def cvs_eeccsd_cis_approx_slow(eom, kshift, nroots=1, imds=None, **kwargs):
 
     return eigval, eigvec
 
-def cvs_eeccsd_matvec_singlet(eom, vector, kshift, imds=None, diag=None):
-    if imds is None: imds = eom.make_imds()
-    nmo = eom.nmo
-    nocc = eom.nocc
-    nvir = nmo - nocc
-    nkpts = eom.nkpts
-    kconserv = eom.get_kconserv_ee_r1(kshift)
-    kconserv_r1 = eom.get_kconserv_ee_r1(kshift)
-    kconserv_r2 = eom.get_kconserv_ee_r2(kshift)
-    vector = eeccsd_matvec_singlet(eom, vector, kshift, imds, diag)
-    Hr1, Hr2 = vector_to_amplitudes_singlet(vector, nkpts, nmo, nocc, kconserv_r2)
-    nonessential = np.delete(np.arange(nocc), eom.mandatory)
-    Hr1[:, nonessential, :] = 0
-    Hr2[:, :, :, nonessential, nonessential[:, np.newaxis], :, :] = 0
-    return amplitudes_to_vector_singlet(Hr1, Hr2, kconserv_r2)
-
-def cvs_optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, eris=None, imds=None, x0=None,
-                               partition=None, **kwargs):
-    """Compute full CCSD spectra.
-
-    Args:
-        eom ([type]): [description]
-        scan ([type]): [description]
-        eta ([type]): [description]
-        kshift (int, optional): [description]. Defaults to 0.
-        tol ([type], optional): [description]. Defaults to 1e-5.
-        maxiter (int, optional): [description]. Defaults to 500.
-        imds ([type], optional): [description]. Defaults to None.
-    """
-    cpu0 = (logger.process_clock(), logger.perf_counter())
-    log = logger.Logger(eom.stdout, eom.verbose)
-
-    if imds is None: imds = eom.make_imds()
-
-    if getattr(eom._cc, "l1", None) is None or getattr(eom._cc, "l2", None) is None:
-        print("Missing lambdas. Computing them now...")
-        eom._cc.solve_lambda(eris=eris, imds=imds)
-
-    if partition:
-        eom.partition = partition.lower()
-        assert eom.partition in ['mp','full']
-
-    kconserv2 = eom.get_kconserv_ee_r2(kshift)
-
-    dipole = get_dipole_mo(eom, "all", "all")
-
-    # b = <\Phi_{\alpha} | \bar{\dipole} | \Phi_0>
-    # b is needed to solve a.x=b linear equations
-    b0, b_vector = get_effective_dipole_left(eom, dipole, kshift)
-    b_size = b_vector.shape[1]
-    # check the \phi_0 component of b vector
-    print(f"b0 = {b0}")
-    if any(abs(b0) > 1e-6):
-        logger.warn(eom, 'Large b0 detected! b0 (x,y,z) = {}). Consider adding b0.conj() * x0 contribution \
-                    to spectra'.format(b0))
-
-    # e = <\Phi_0 | (1+\Lambda) \bar{\dipole^{\dagger}} | \Phi_{\alpha}>
-    e0, e_vector = get_effective_dipole_right(eom, dipole, kshift, ov_oovv=b_vector)
-
-    # solve linear equations A.x = b
-    ieta = 1j*eta
-    omega_list = scan
-    spectrum = np.zeros((3, len(omega_list)), dtype=np.complex)
-
-    diag = eom.get_diag(kshift, imds)
-    if x0 is None:
-        x0 = np.zeros((3, b_size), dtype=b_vector.dtype)
-
-    from pyscf.pbc.ci import kcis_rhf
-    counter = kcis_rhf.gmres_counter(rel=True)
-    LinearSolver = scipy.sparse.linalg.gcrotmk
-
-    for i, omega in enumerate(omega_list):
-        matvec = lambda vec: cvs_eeccsd_matvec_singlet(eom, vec, kshift, imds=imds) * (-1.) + (omega + ieta) * vec
-        A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=diag.dtype)
-
-        # preconditioner
-        # M is the inverse of P, where P should be close to A, but easy to solve.
-        # We choose P = H_diags shifted by omega + ieta.
-        M = scipy.sparse.diags(np.reciprocal(diag * (-1.) + omega + ieta), format='csc', dtype=diag.dtype)
-
-        for x in range(3):
-
-            sol, info = LinearSolver(A, b_vector[x], x0=x0[x], tol=tol, maxiter=maxiter, M=M, callback=counter,
-                                     **kwargs)
-            if info == 0:
-                print('Frequency', np.round(omega,3), 'converged in', counter.niter, 'iterations')
-            else:
-                print('Frequency', np.round(omega,3), 'not converged after', counter.niter, 'iterations')
-            counter.reset()
-
-            x0[x] = sol
-            spectrum[x,i] = np.dot(e_vector[x], sol)
-
-            sol0 = b0[x] + np.dot(sol, amplitudes_to_vector_singlet(imds.Fov, imds.woOvV, kconserv2))
-            sol0 /= omega + ieta
-            spec0 = e0[x] * sol0
-            logger.debug(eom, 'b0.conj * x0 contribution to spectrum = %.15g', spec0)
-
-            spectrum[x, i] += spec0
-
-    log.timer('EOM-CCSD Spectrum', *cpu0)
-
-    return -1./np.pi*spectrum.imag, x0
-
 class CVSEOMEESinglet(EOMEESinglet):
     def __init__(self, cc):
         EOMEESinglet.__init__(self, cc)
         mandatory = list(range(cc.nocc))
 
-    matvec = cvs_eeccsd_matvec_singlet
-    
+    def matvec(eom, vector, kshift, imds=None, diag=None):
+        dtype = np.result_type(vector)
+        nmo = eom.nmo
+        nocc = eom.nocc
+        nonessential = np.delete(np.arange(nocc), eom.mandatory)
+        input_vec = vector.copy()
+        vec1, vec2 = eom.vector_to_amplitudes(input_vec)
+        e_shift1 = np.zeros_like(vec1)
+        e_shift2 = np.zeros_like(vec2)
+        e_shift1[:, nonessential, :] = vec1[:, nonessential, :] * 10.0e15
+        e_shift2[:, :, :, nonessential, nonessential[:, np.newaxis], :, :] = vec2[:, :, :, nonessential, nonessential[:, np.newaxis], :, :] * 10.0e15
+        e_shift = eom.amplitudes_to_vector(e_shift1, e_shift2)
+        vector = eeccsd_matvec_singlet(eom, vector, kshift, imds, diag)
+        vector += e_shift
+
+        return vector
+
+    def get_diag(eom, kshift, imds=None, diag=None):
+        nmo = eom.nmo
+        nocc = eom.nocc
+        nonessential = np.delete(np.arange(nocc), eom.mandatory)
+        vector = eeccsd_diag(eom, kshift, imds, diag)
+        Hr1, Hr2 = eom.vector_to_amplitudes(vector)
+        Hr1[:, nonessential, :] += 10.0e15
+        Hr2[:, :, :, nonessential, nonessential[:, np.newaxis], :, :] += 10.0e15
+        vector = eom.amplitudes_to_vector(Hr1, Hr2)
+
+        return vector
+
     def get_init_guess(eom, kshift, nroots=1, imds=None, **kwargs):
         '''Build initial R vector through diagonalization of <r1|Hbar|r1>
 
@@ -2496,16 +2383,6 @@ class CVSEOMEESinglet(EOMEESinglet):
             guess.append(g)
 
         return guess
-
-    def get_absorption_spectrum(self, scan, eta, approx=0, **kwargs):
-        if approx == 0:
-            return cvs_optical_absorption_singlet(self, scan, eta, **kwargs)
-        elif approx == 1:
-            return optical_absorption_singlet_approx1(self, scan, eta, **kwargs)
-        elif approx == 2:
-            return optical_absorption_singlet_approx2(self, scan, eta, **kwargs)
-        else:
-            raise NotImplementedError("Unknown approximation to CC spectrum")
 
 imd = imdk
 
