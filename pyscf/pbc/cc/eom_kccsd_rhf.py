@@ -176,8 +176,9 @@ def ipccsd_diag(eom, kshift, imds=None, diag=None):
 
     Hr2 = np.zeros((nkpts, nkpts, nocc, nocc, nvir), dtype=t1.dtype)
     if eom.partition == 'mp':
-        foo = eom.eris.fock[:, :nocc, :nocc]
-        fvv = eom.eris.fock[:, nocc:, nocc:]
+        fock = imds.eris.fock
+        foo = fock[:, :nocc, :nocc]
+        fvv = fock[:, nocc:, nocc:]
         for ki in range(nkpts):
             for kj in range(nkpts):
                 kb = kconserv[ki, kshift, kj]
@@ -494,7 +495,7 @@ def eaccsd_matvec(eom, vector, kshift, imds=None, diag=None):
 
     # 2p1h-2p1h block
     if eom.partition == 'mp':
-        fock = eom.eris.fock
+        fock = imds.eris.fock
         foo = fock[:, :nocc, :nocc]
         fvv = fock[:, nocc:, nocc:]
         for kj in range(nkpts):

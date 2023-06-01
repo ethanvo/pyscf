@@ -615,8 +615,6 @@ def ipccsd(eom, nroots=1, koopmans=False, guess=None, left=False,
     if partition:
         eom.partition = partition.lower()
         assert eom.partition in ['mp','full']
-        if eom.partition in ['mp', 'full']:
-            raise NotImplementedError
     eom.converged, eom.e, eom.v \
             = kernel(eom, nroots, koopmans, guess, left, eris=eris, imds=imds,
                      partition=partition, kptlist=kptlist, dtype=dtype)
@@ -653,8 +651,6 @@ def ipccsd_star(eom, nroots=1, koopmans=False, right_guess=None, left_guess=None
                 eris=None, imds=None, partition=None, kptlist=None,
                 dtype=None, **kwargs):
     '''See `kernel()` for a description of arguments.'''
-    if partition:
-        raise NotImplementedError
     return perturbed_ccsd_kernel(eom, nroots=nroots, koopmans=koopmans,
                                  right_guess=right_guess, left_guess=left_guess, eris=eris,
                                  imds=imds, partition=partition, kptlist=kptlist, dtype=dtype)
@@ -1170,8 +1166,6 @@ def eaccsd_star(eom, nroots=1, koopmans=False, right_guess=None, left_guess=None
                 eris=None, imds=None, partition=None, kptlist=None,
                 dtype=None, **kwargs):
     '''See `kernel()` for a description of arguments.'''
-    if partition:
-        raise NotImplementedError
     return perturbed_ccsd_kernel(eom, nroots=nroots, koopmans=koopmans,
                                  right_guess=right_guess, left_guess=left_guess, eris=eris,
                                  imds=imds, partition=partition, kptlist=kptlist, dtype=dtype)
