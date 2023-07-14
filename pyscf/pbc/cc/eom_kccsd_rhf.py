@@ -414,7 +414,7 @@ class EOMIP(eom_kgccsd.EOMIP):
 
     def make_imds(self, eris=None):
         imds = _IMDS(self._cc, eris)
-        imds.make_ip()
+        imds.make_ip(ip_partition=self.partition)
         return imds
 
 class EOMIP_Ta(EOMIP):
@@ -847,7 +847,7 @@ class EOMEA(eom_kgccsd.EOMEA):
 
     def make_imds(self, eris=None):
         imds = _IMDS(self._cc, eris)
-        imds.make_ea()
+        imds.make_ea(ea_partition=self.partition)
         return imds
 
 class EOMEA_Ta(EOMEA):
@@ -2454,7 +2454,8 @@ class _IMDS:
 
         if self._fimd is not None:
             nkpts, nocc, nvir = t1.shape
-            oooo_dest = self._fimd.create_dataset('oooo', (nkpts, nkpts, nkpts, nocc, nocc, nocc, nocc), t1.dtype.char)
+            if ip_partition != 'mp':
+                oooo_dest = self._fimd.create_dataset('oooo', (nkpts, nkpts, nkpts, nocc, nocc, nocc, nocc), t1.dtype.char)
             ooov_dest = self._fimd.create_dataset('ooov', (nkpts, nkpts, nkpts, nocc, nocc, nocc, nvir), t1.dtype.char)
             ovoo_dest = self._fimd.create_dataset('ovoo', (nkpts, nkpts, nkpts, nocc, nvir, nocc, nocc), t1.dtype.char)
         else:
@@ -2501,7 +2502,7 @@ class _IMDS:
             nkpts, nocc, nvir = t1.shape
             vovv_dest = self._fimd.create_dataset('vovv', (nkpts, nkpts, nkpts, nvir, nocc, nvir, nvir), t1.dtype.char)
             vvvo_dest = self._fimd.create_dataset('vvvo', (nkpts, nkpts, nkpts, nvir, nvir, nvir, nocc), t1.dtype.char)
-            if eris.vvvv is not None:
+            if eris.vvvv is not None and ea_partition != 'mp':
                 vvvv_dest = self._fimd.create_dataset('vvvv', (nkpts, nkpts, nkpts, nvir, nvir, nvir, nvir), t1.dtype.char)  # noqa: E501
         else:
             vovv_dest = vvvo_dest = vvvv_dest = None

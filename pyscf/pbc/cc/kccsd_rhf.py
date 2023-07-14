@@ -30,6 +30,8 @@ import pyscf.cc.ccsd
 from pyscf.pbc import scf
 from pyscf.pbc.mp.kmp2 import (get_frozen_mask, get_nocc, get_nmo,
                                padded_mo_coeff, padding_k_idx)  # noqa
+from pyscf.pbc.mp.kmp2 import kernel as kmp2_kernel
+from pyscf.pbc import df
 from pyscf.pbc.cc import kintermediates_rhf as imdk
 from pyscf.lib.parameters import LOOSE_ZERO_TOL, LARGE_DENOM  # noqa
 from pyscf.pbc.lib import kpts_helper
@@ -604,13 +606,39 @@ class RCCSD(pyscf.cc.ccsd.CCSD):
                 Use one-shot MBPT2 approximation to CCSD.
         '''
         self.dump_flags()
+
+        if mbpt2:
+            kpts = self.kpts
+            nkpts = self.nkpts
+            nocc = self.nocc
+            nvir = self.nmo - nocc
+            if getattr(self._scf, "fock", None) is not None:
+                fock = self._scf.fock
+            else:
+                dm = self._scf.make_rdm1(self.mo_coeff, self.mo_occ)
+                exxdiv = self._scf.exxdiv if self.keep_exxdiv else None
+                with lib.temporary_env(self._scf, exxdiv=exxdiv):
+                    vhf = self._scf.get_veff(self._scf.cell, dm)
+                fockao = self._scf.get_hcore() + vhf
+                fock = np.asarray([reduce(np.dot, (mo.T.conj(), fockao[k], mo))
+                                   for k, mo in enumerate(self.mo_coeff)])
+            self.mo_energy = [fock[k].diagonal().real for k in range(nkpts)]
+            if not self.keep_exxdiv:
+                madelung = tools.madelung(cell, kpts)
+                self.mo_energy = [_adjust_occ(mo_e, nocc, -madelung)
+                             for k, mo_e in enumerate(self.mo_energy)]
+            if isinstance(self._scf.with_df, df.GDF):
+                self.with_df_ints = True
+            else:
+                self.with_df_ints = False
+            self.e_corr, self.t2 = kmp2_kernel(self, mo_energy=self.mo_energy, mo_coeff=self.mo_coeff)
+            self.t1 = np.zeros((nkpts,nocc,nvir), dtype=self.t2.dtype)
+            return self.e_corr, self.t1, self.t2
+
         if eris is None:
             # eris = self.ao2mo()
             eris = self.ao2mo(self.mo_coeff)
         self.eris = eris
-        if mbpt2:
-            self.e_corr, self.t1, self.t2 = self.init_amps(eris)
-            return self.e_corr, self.t1, self.t2
 
         self.converged, self.e_corr, self.t1, self.t2 = \
             kernel(self, eris, t1, t2, max_cycle=self.max_cycle,
