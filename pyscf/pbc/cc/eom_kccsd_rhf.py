@@ -482,8 +482,12 @@ def eaccsd_matvec(eom, vector, kshift, imds=None, diag=None):
         Hr1 += -einsum('ld,lda->a', imds.Fov[kl], r2[kl, kl])
         for kc in range(nkpts):
             kd = kconserv[kshift, kc, kl]
-            Hr1 += 2. * einsum('alcd,lcd->a', imds.Wvovv[kshift, kl, kc], r2[kl, kc])
-            Hr1 += -einsum('aldc,lcd->a', imds.Wvovv[kshift, kl, kd], r2[kl, kc])
+            if eom.partition == 'mp':
+                Hr1 += 2. * einsum('alcd,lcd->a', imds.eris.vovv[kshift, kl, kc], r2[kl, kc])
+                Hr1 += -einsum('aldc,lcd->a', imds.eris.vovv[kshift, kl, kd], r2[kl, kc])
+            else:
+                Hr1 += 2. * einsum('alcd,lcd->a', imds.Wvovv[kshift, kl, kc], r2[kl, kc])
+                Hr1 += -einsum('aldc,lcd->a', imds.Wvovv[kshift, kl, kd], r2[kl, kc])
 
     # Eq. (31)
     # 2p1h-1p block
@@ -2508,14 +2512,14 @@ class _IMDS:
             vovv_dest = vvvo_dest = vvvv_dest = None
 
         # 3 or 4 virtuals
-        self.Wvovv = imd.Wvovv(t1, t2, eris, kconserv, vovv_dest)
         if ea_partition == 'mp' and np.all(t1 == 0):
-            self.Wvvvo = imd.Wvvvo(t1, t2, eris, kconserv, vvvo_dest)
+            self.Wvvvo = imd.Wvvvo(t1, t2, eris, kconserv, None, vvvo_dest)
         else:
             if eris.vvvv is None:
                 self.Wvvvv = None
             else:
                 self.Wvvvv = imd.Wvvvv(t1, t2, eris, kconserv, vvvv_dest)
+            self.Wvovv = imd.Wvovv(t1, t2, eris, kconserv, vovv_dest)
             self.Wvvvo = imd.Wvvvo(t1, t2, eris, kconserv, self.Wvvvv, vvvo_dest)
         self.made_ea_imds = True
         log.timer('EOM-CCSD EA intermediates', *cput0)
