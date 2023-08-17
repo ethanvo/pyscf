@@ -57,12 +57,8 @@ def ipccsd_matvec(eom, vector, kshift, imds=None, diag=None):
         Hr1 += -einsum('ld,lid->i', imds.Fov[kl], r2[kl, kshift])
         for kk in range(nkpts):
             kd = kconserv[kk, kshift, kl]
-            if eom.partition == 'mp':
-                Hr1 += -2. * einsum('klid,kld->i', imds.eris.ooov[kk, kl, kshift], r2[kk, kl])
-                Hr1 += einsum('lkid,kld->i', imds.eris.ooov[kl, kk, kshift], r2[kk, kl])
-            else:
-                Hr1 += -2. * einsum('klid,kld->i', imds.Wooov[kk, kl, kshift], r2[kk, kl])
-                Hr1 += einsum('lkid,kld->i', imds.Wooov[kl, kk, kshift], r2[kk, kl])
+            Hr1 += -2. * einsum('klid,kld->i', imds.Wooov[kk, kl, kshift], r2[kk, kl])
+            Hr1 += einsum('lkid,kld->i', imds.Wooov[kl, kk, kshift], r2[kk, kl])
 
     Hr2 = np.zeros(r2.shape, dtype=np.result_type(imds.Wovoo.dtype, r1.dtype))
     # 2h1p-1h block
@@ -486,12 +482,8 @@ def eaccsd_matvec(eom, vector, kshift, imds=None, diag=None):
         Hr1 += -einsum('ld,lda->a', imds.Fov[kl], r2[kl, kl])
         for kc in range(nkpts):
             kd = kconserv[kshift, kc, kl]
-            if eom.partition == 'mp':
-                Hr1 += 2. * einsum('alcd,lcd->a', imds.eris.vovv[kshift, kl, kc], r2[kl, kc])
-                Hr1 += -einsum('aldc,lcd->a', imds.eris.vovv[kshift, kl, kd], r2[kl, kc])
-            else:
-                Hr1 += 2. * einsum('alcd,lcd->a', imds.Wvovv[kshift, kl, kc], r2[kl, kc])
-                Hr1 += -einsum('aldc,lcd->a', imds.Wvovv[kshift, kl, kd], r2[kl, kc])
+            Hr1 += 2. * einsum('alcd,lcd->a', imds.Wvovv[kshift, kl, kc], r2[kl, kc])
+            Hr1 += -einsum('aldc,lcd->a', imds.Wvovv[kshift, kl, kd], r2[kl, kc])
 
     # Eq. (31)
     # 2p1h-1p block
@@ -2477,6 +2469,8 @@ class _IMDS:
         if ip_partition != 'mp':
             self.Woooo = imd.Woooo(t1, t2, eris, kconserv, oooo_dest)
             self.Wooov = imd.Wooov(t1, t2, eris, kconserv, ooov_dest)
+        elif ip_partition == 'mp':
+            self.Wooov = eris.ooov
         self.Wovoo = imd.Wovoo(t1, t2, eris, kconserv, ovoo_dest)
         self.made_ip_imds = True
         log.timer('EOM-CCSD IP intermediates', *cput0)
@@ -2522,6 +2516,7 @@ class _IMDS:
         # 3 or 4 virtuals
         if ea_partition == 'mp' and np.all(t1 == 0):
             self.Wvvvo = imd.Wvvvo(t1, t2, eris, kconserv, None, vvvo_dest)
+            self.Wvovv = eris.vovv
         else:
             if eris.vvvv is None:
                 self.Wvvvv = None
