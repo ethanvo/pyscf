@@ -103,6 +103,22 @@ def Lvv(t1,t2,eris,kconserv):
             Lac[ka] += einsum('akcd,kd->ac',Svovv,t1[kk])
     return Lac
 
+def Loo2(t1,t2,eris,kconserv):
+    nkpts, nocc, nvir = t1.shape
+    fov = eris.fock[:,:nocc,nocc:]
+    Lki = cc_Foo(t1,t2,eris,kconserv)
+    for ki in range(nkpts):
+        Lki[ki] += einsum('kc,ic->ki',fov[ki],t1[ki])
+    return Lki
+
+def Lvv2(t1,t2,eris,kconserv):
+    nkpts, nocc, nvir = t1.shape
+    fov = eris.fock[:,:nocc,nocc:]
+    Lac = cc_Fvv(t1,t2,eris,kconserv)
+    for ka in range(nkpts):
+        Lac[ka] += -einsum('kc,ka->ac',fov[ka],t1[ka])
+    return Lac
+
 ### Eqs. (42)-(45) "chi"
 
 def cc_Woooo(t1, t2, eris, kconserv, out=None):
@@ -135,6 +151,25 @@ def cc_Woooo(t1, t2, eris, kconserv, out=None):
                 # =====   End of change  = ====
 
         # Be careful about making this term only after all the others are created
+        for kl in range(kk+1):
+            for ki in range(nkpts):
+                kj = kconserv[kk,ki,kl]
+                Wklij[kl,kk,kj] = Wklij[kk,kl,ki].transpose(1,0,3,2)
+    return Wklij
+
+def cc_Woooo2(t1, t2, eris, kconserv, out=None):
+    nkpts, nocc, nvir = t1.shape
+
+    Wklij = _new(eris.oooo.shape, t1.dtype, out)
+    for kk in range(nkpts):
+        for kl in range(kk+1):
+            for ki in range(nkpts):
+                kj = kconserv[kk,ki,kl]
+                oooo  = einsum('klic,jc->klij',eris.ooov[kk,kl,ki],t1[kj])
+                oooo += einsum('lkjc,ic->klij',eris.ooov[kl,kk,kj],t1[ki])
+                oooo += eris.oooo[kk,kl,ki]
+                oooo += einsum('klcd,ic,jd->klij',eris.oovv[kk,kl,ki],t1[ki],t1[kj])
+                Wklij[kk,kl,ki] = oooo
         for kl in range(kk+1):
             for ki in range(nkpts):
                 kj = kconserv[kk,ki,kl]
