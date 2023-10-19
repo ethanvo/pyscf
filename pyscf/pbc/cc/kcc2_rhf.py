@@ -133,7 +133,7 @@ def update_t1(cc, t1, t2, eris):
 
     time0 = log.timer_debug1('update t1', *time0)
 
-    return t1new, t2new
+    return t1new
 
 def update_t2(cc, t1, t2, eris):
     time0 = time1 = logger.process_clock(), logger.perf_counter()
@@ -182,8 +182,7 @@ def update_t2(cc, t1, t2, eris):
     for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
         # Chemist's notation for momentum conserving t2(ki,kj,ka,kb)
         kb = kconserv[ki, ka, kj]
-
-        t2new[ki, kj, ka] += einsum('klij,ka,lb->ijab', Woooo[kk, kl, ki], t1[ka], t1[kb])
+        t2new[ki, kj, ka] += einsum('klij,ka,lb->ijab', Woooo[ka, kb, ki], t1[ka], t1[kb])
     Woooo = None
     fimd = None
     time1 = log.timer_debug1('t2 oooo', *time1)
@@ -469,9 +468,7 @@ def add_vvvv_(cc, Ht2, t1, t2, eris):
     for ka, kb, kc in kpts_helper.loop_kkk(nkpts):
         kd = kconserv[ka, kc, kb]
         Wvvvv = get_Wvvvv(ka, kb, kc)
-        for ki in range(nkpts):
-            kj = kconserv[ka, ki, kb]
-            Ht2[ki, kj, ka] += lib.einsum('abcd,ic,jd->ijab', Wvvvv, t1[ki], t1[kj])
+        Ht2[kc, kd, ka] += lib.einsum('abcd,ic,jd->ijab', Wvvvv, t1[kc], t1[kd])
     fimd = None
     return Ht2
 
@@ -686,8 +683,6 @@ class KRCC2(pyscf.cc.ccsd.CCSD):
                                     tol=self.conv_tol_normt, 
                                     verbose=self.verbose)
         return self.l1, self.l2
-        
-KRCCSD = RCCSD
 
 #######################################
 #
@@ -980,5 +975,5 @@ def _mem_usage(nkpts, nocc, nvir):
     return incore * 16 / 1e6, outcore * 16 / 1e6, basic * 16 / 1e6
 
 
-scf.khf.KRHF.CCSD = lib.class_as_method(KRCCSD)
+scf.khf.KRHF.CC2 = lib.class_as_method(KRCC2)
 scf.krohf.KROHF.CCSD = None

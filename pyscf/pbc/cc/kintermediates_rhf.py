@@ -106,7 +106,7 @@ def Lvv(t1,t2,eris,kconserv):
 def Loo2(t1,t2,eris,kconserv):
     nkpts, nocc, nvir = t1.shape
     fov = eris.fock[:,:nocc,nocc:]
-    Lki = cc_Foo(t1,t2,eris,kconserv)
+    Lki = eris.fock[:,:nocc,:nocc].copy()
     for ki in range(nkpts):
         Lki[ki] += einsum('kc,ic->ki',fov[ki],t1[ki])
     return Lki
@@ -114,7 +114,7 @@ def Loo2(t1,t2,eris,kconserv):
 def Lvv2(t1,t2,eris,kconserv):
     nkpts, nocc, nvir = t1.shape
     fov = eris.fock[:,:nocc,nocc:]
-    Lac = cc_Fvv(t1,t2,eris,kconserv)
+    Lac = eris.fock[:,nocc:,nocc:].copy()
     for ka in range(nkpts):
         Lac[ka] += -einsum('kc,ka->ac',fov[ka],t1[ka])
     return Lac
