@@ -79,9 +79,6 @@ def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
         mem_usage += (nkpts**2 * naux * nocc * nvir) * 16 / 1e6
     if with_t2:
         mem_usage += (nkpts**3 * (nocc * nvir)**2) * 16 / 1e6
-    if mem_usage > mem_avail:
-        raise MemoryError('Insufficient memory! MP2 memory usage %d MB (currently available %d MB)'
-                          % (mem_usage, mem_avail))
 
     eia = np.zeros((nocc,nvir))
     eijab = np.zeros((nocc,nocc,nvir,nvir))
@@ -98,7 +95,13 @@ def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
     nonzero_opadding, nonzero_vpadding = padding_k_idx(mp, kind="split")
 
     if with_t2:
-        t2 = np.zeros((nkpts, nkpts, nkpts, nocc, nocc, nvir, nvir), dtype=complex)
+        if mem_usage > mem_avail:
+            ft2 = lib.H5TmpFile()
+            t2 = ft2.create_dataset('t2', (nkpts, nkpts, nkpts, nocc, nocc, nvir, nvir), dtype=complex)
+#            raise MemoryError('Insufficient memory! MP2 memory usage %d MB (currently available %d MB)'
+#                            % (mem_usage, mem_avail))
+        else:
+            t2 = np.zeros((nkpts, nkpts, nkpts, nocc, nocc, nvir, nvir), dtype=complex)
     else:
         t2 = None
 
