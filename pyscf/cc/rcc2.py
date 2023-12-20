@@ -16,24 +16,6 @@ from pyscf.mp import mp2
 BLKMIN = getattr(__config__, 'cc_ccsd_blkmin', 4)
 MEMORYMIN = getattr(__config__, 'cc_ccsd_memorymin', 2000)
 
-def energy(cc, t1=None, t2=None, eris=None):
-    '''RCCSD correlation energy'''
-    if t1 is None: t1 = cc.t1
-    if t2 is None: t2 = cc.t2
-    if eris is None: eris = cc.ao2mo()
-
-    nocc, nvir = t1.shape
-    fock = eris.fock
-    e = 2*np.einsum('ia,ia', fock[:nocc,nocc:], t1)
-    tau = np.einsum('ia,jb->ijab',t1,t1)
-    tau += t2
-    eris_ovov = np.asarray(eris.ovov)
-    e += 2*np.einsum('ijab,iajb', tau, eris_ovov)
-    e +=  -np.einsum('ijab,ibja', tau, eris_ovov)
-    if abs(e.imag) > 1e-4:
-        logger.warn(cc, 'Non-zero imaginary part found in RCCSD energy %s', e)
-    return e.real
-
 def update_t1(cc, t1, t2, eris):
     # Ref: Hirata et al., J. Chem. Phys. 120, 2581 (2004) Eqs.(35)-(36)
     assert(isinstance(eris, ccsd._ChemistsERIs))
@@ -120,7 +102,7 @@ def update_t2(cc, t1, t2, eris):
     t2new += lib.einsum('klij,ka,lb->ijab', Woooo2, t1, t1)
     Wvvvv = lib.einsum('kcbd,ka->abcd', eris_ovvv, -t1)
     Wvvvv = Wvvvv + Wvvvv.transpose(1,0,3,2)
-    Wvvvv += np.asarray(eris.vvvv).transpose(0,2,1,3)
+    Wvvvv += np.asarray(imd._get_vvvv(eris)).transpose(0,2,1,3)
     t2new += lib.einsum('abcd,ic,jd->ijab', Wvvvv, t1, t1)
     Lvv2 = fvv - np.einsum('kc,ka->ac', fov, t1)
     Lvv2 -= np.diag(np.diag(fvv))
@@ -199,111 +181,3 @@ class RCC2(ccsd.CCSD):
     '''
     kernel = kernel
     update_amps = update_amps
-
-    def ao2mo(self, mo_coeff=None):
-        nmo = self.nmo
-        nao = self.mo_coeff.shape[0]
-        nmo_pair = nmo * (nmo+1) // 2
-        nao_pair = nao * (nao+1) // 2
-        mem_incore = (max(nao_pair**2, nmo**4) + nmo_pair**2) * 8/1e6
-        mem_now = lib.current_memory()[0]
-        if (self._scf._eri is not None and
-            (mem_incore+mem_now < self.max_memory) or self.mol.incore_anyway):
-            return _make_eris_incore(self, mo_coeff)
-
-        elif getattr(self._scf, 'with_df', None):
-            logger.warn(self, 'CCSD detected DF being used in the HF object. '
-                        'MO integrals are computed based on the DF 3-index tensors.\n'
-                        'It\'s recommended to use dfccsd.CCSD for the '
-                        'DF-CCSD calculations')
-            raise NotImplementedError
-            #return _make_df_eris_outcore(self, mo_coeff)
-
-        else:
-            return _make_eris_outcore(self, mo_coeff)
-
-class _ChemistsERIs(ccsd._ChemistsERIs):
-
-    def get_ovvv(self, *slices):
-        '''To access a subblock of ovvv tensor'''
-        if slices:
-            return self.ovvv[slices]
-        else:
-            return self.ovvv
-
-def _make_eris_incore(mycc, mo_coeff=None, ao2mofn=None):
-    cput0 = (logger.process_clock(), logger.perf_counter())
-    eris = _ChemistsERIs()
-    eris._common_init_(mycc, mo_coeff)
-    nocc = eris.nocc
-    nmo = eris.fock.shape[0]
-
-    if callable(ao2mofn):
-        eri1 = ao2mofn(eris.mo_coeff).reshape([nmo]*4)
-    else:
-        eri1 = ao2mo.incore.full(mycc._scf._eri, eris.mo_coeff)
-        eri1 = ao2mo.restore(1, eri1, nmo)
-    eris.oooo = eri1[:nocc,:nocc,:nocc,:nocc].copy()
-    eris.ovoo = eri1[:nocc,nocc:,:nocc,:nocc].copy()
-    eris.ovov = eri1[:nocc,nocc:,:nocc,nocc:].copy()
-    eris.oovv = eri1[:nocc,:nocc,nocc:,nocc:].copy()
-    eris.ovvo = eri1[:nocc,nocc:,nocc:,:nocc].copy()
-    eris.ovvv = eri1[:nocc,nocc:,nocc:,nocc:].copy()
-    eris.vvvv = eri1[nocc:,nocc:,nocc:,nocc:].copy()
-    logger.timer(mycc, 'CCSD integral transformation', *cput0)
-    return eris
-
-def _make_eris_outcore(mycc, mo_coeff=None):
-    cput0 = (logger.process_clock(), logger.perf_counter())
-    log = logger.Logger(mycc.stdout, mycc.verbose)
-    eris = _ChemistsERIs()
-    eris._common_init_(mycc, mo_coeff)
-
-    mol = mycc.mol
-    mo_coeff = eris.mo_coeff
-    nocc = eris.nocc
-    nao, nmo = mo_coeff.shape
-    nvir = nmo - nocc
-    eris.feri1 = lib.H5TmpFile()
-    eris.oooo = eris.feri1.create_dataset('oooo', (nocc,nocc,nocc,nocc), 'f8')
-    eris.ovoo = eris.feri1.create_dataset('ovoo', (nocc,nvir,nocc,nocc), 'f8', chunks=(nocc,1,nocc,nocc))
-    eris.ovov = eris.feri1.create_dataset('ovov', (nocc,nvir,nocc,nvir), 'f8', chunks=(nocc,1,nocc,nvir))
-    eris.ovvo = eris.feri1.create_dataset('ovvo', (nocc,nvir,nvir,nocc), 'f8', chunks=(nocc,1,nvir,nocc))
-    eris.ovvv = eris.feri1.create_dataset('ovvv', (nocc,nvir,nvir,nvir), 'f8')
-    eris.oovv = eris.feri1.create_dataset('oovv', (nocc,nocc,nvir,nvir), 'f8', chunks=(nocc,nocc,1,nvir))
-    eris.vvvv = eris.feri1.create_dataset('vvvv', (nvir,nvir,nvir,nvir), 'f8')
-    max_memory = max(MEMORYMIN, mycc.max_memory-lib.current_memory()[0])
-
-    ftmp = lib.H5TmpFile()
-    ao2mo.full(mol, mo_coeff, ftmp, max_memory=max_memory, verbose=log)
-    eri = ftmp['eri_mo']
-
-    nocc_pair = nocc*(nocc+1)//2
-    tril2sq = lib.square_mat_in_trilu_indices(nmo)
-    oo = eri[:nocc_pair]
-    eris.oooo[:] = ao2mo.restore(1, oo[:,:nocc_pair], nocc)
-    oovv = lib.take_2d(oo, tril2sq[:nocc,:nocc].ravel(), tril2sq[nocc:,nocc:].ravel())
-    eris.oovv[:] = oovv.reshape(nocc,nocc,nvir,nvir)
-    oo = oovv = None
-
-    tril2sq = lib.square_mat_in_trilu_indices(nmo)
-    blksize = min(nvir, max(BLKMIN, int(max_memory*1e6/8/nmo**3/2)))
-    for p0, p1 in lib.prange(0, nvir, blksize):
-        q0, q1 = p0+nocc, p1+nocc
-        off0 = q0*(q0+1)//2
-        off1 = q1*(q1+1)//2
-        buf = lib.unpack_tril(eri[off0:off1])
-
-        tmp = buf[ tril2sq[q0:q1,:nocc] - off0 ]
-        eris.ovoo[:,p0:p1] = tmp[:,:,:nocc,:nocc].transpose(1,0,2,3)
-        eris.ovvo[:,p0:p1] = tmp[:,:,nocc:,:nocc].transpose(1,0,2,3)
-        eris.ovov[:,p0:p1] = tmp[:,:,:nocc,nocc:].transpose(1,0,2,3)
-        eris.ovvv[:,p0:p1] = tmp[:,:,nocc:,nocc:].transpose(1,0,2,3)
-
-        tmp = buf[ tril2sq[q0:q1,nocc:q1] - off0 ]
-        eris.vvvv[p0:p1,:p1] = tmp[:,:,nocc:,nocc:]
-        if p0 > 0:
-            eris.vvvv[:p0,p0:p1] = tmp[:,:p0,nocc:,nocc:].transpose(1,0,2,3)
-        buf = tmp = None
-    log.timer('CCSD integral transformation', *cput0)
-    return eris
