@@ -1,17 +1,9 @@
-import ctypes
-from functools import reduce
 import numpy as np
-from pyscf import gto
 from pyscf import lib
 from pyscf.lib import logger
-from pyscf import ao2mo
-from pyscf.ao2mo import _ao2mo
-from pyscf.cc import _ccsd
-from pyscf.mp.mp2 import get_nocc, get_nmo, get_frozen_mask, _mo_without_core
 from pyscf import __config__
 from pyscf.cc import ccsd
 from pyscf.cc import rintermediates as imd
-from pyscf.mp import mp2
 
 BLKMIN = getattr(__config__, 'cc_ccsd_blkmin', 4)
 MEMORYMIN = getattr(__config__, 'cc_ccsd_memorymin', 2000)

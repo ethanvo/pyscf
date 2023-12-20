@@ -1,13 +1,9 @@
 import numpy as np
 from pyscf import lib
 from pyscf.lib import logger
-from pyscf.ao2mo import _ao2mo
 from pyscf import __config__
 from pyscf.cc import ccsd
 from pyscf.cc import rintermediates as imd
-from pyscf.cc.ccsd import _ChemistsERIs
-from pyscf import ao2mo
-from pyscf.cc.ccsd import _make_eris_incore, _make_df_eris_outcore, _make_eris_outcore
 
 BLKMIN = getattr(__config__, 'cc_ccsd_blkmin', 4)
 MEMORYMIN = getattr(__config__, 'cc_ccsd_memorymin', 2000)
