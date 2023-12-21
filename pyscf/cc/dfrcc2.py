@@ -31,6 +31,8 @@ def update_t1(cc, t1, t2, eris):
     Lov = eris.Lov
     Lvv = eris.Lvv
 
+    eia = mo_e_o[:,None] - mo_e_v
+    
     # T1 equation
     t1new  =-2*np.einsum('kc,ka,ic->ia', fov, t1, t1)
     t1new +=   np.einsum('ac,ic->ia', Fvv, t1)
@@ -50,7 +52,6 @@ def update_t1(cc, t1, t2, eris):
     t1new +=-2*lib.einsum('Llc,Lki,lc,ka->ia', Lov, Loo, t1, t1)
     t1new +=   lib.einsum('Lkc,Lli,lc,ka->ia', Lov, Loo, t1, t1)
 
-    eia = mo_e_o[:,None] - mo_e_v
     t1new /= eia
 
     return t1new
@@ -112,9 +113,40 @@ def update_t2(cc, t1, t2, eris):
 
     return t2new
 
+def make_t2(cc, t1, eris):
+    nocc = eris.nocc
+    nmo = eris.fock.shape[0]
+    nvir = nmo - nocc
+    naux = cc._scf.with_df.get_naoaux()
+    mo_e_o = eris.mo_energy[:nocc]
+    mo_e_v = eris.mo_energy[nocc:] + cc.level_shift
+    eia = mo_e_o[:,None] - mo_e_v
+    eijab = lib.direct_sum('ia,jb->ijab',eia,eia)
+    C = eris.mo_coeff.copy()
+    X = C[:, nocc:] - lib.einsum('ui,ia->ua', C[:, :nocc], t1)
+    Y = C[:, :nocc] + lib.einsum('ua,ia->ui', C[:, nocc:], t1)
+    C[:, :nocc] = Y
+    C[:, nocc:] = X
+    Lov = np.empty((naux,nocc,nvir))
+    ijslice = (0, nmo, 0, nmo)
+    Lpq = None
+    p1 = 0
+    for eri1 in cc._scf.with_df.loop():
+        Lpq = _ao2mo.nr_e2(eri1, C, ijslice, aosym='s2', out=Lpq).reshape(-1,nmo,nmo)
+        p0, p1 = p1, p1 + Lpq.shape[0]
+        Lov[p0:p1] = Lpq[:,:nocc,nocc:]
+    t2 = lib.einsum('Lia,Ljb->ijab', Lov, Lov)
+    t2 /= eijab
+    return t2
+
 def update_amps(cc, t1, t2, eris):
+    t2 = make_t2(cc, t1, eris)
     t1new = update_t1(cc, t1, t2, eris)
-    t2new = update_t2(cc, t1, t2, eris)
+    t2new = make_t2(cc, t1new, eris)
+    # Compare t2_t1 with t2
+    print("T2 COMPARE")
+    #print(np.allclose(t2_t1, t2))
+    #t2new = update_t2(cc, t1, t2, eris)
     return t1new, t2new
 
 # t1: ia
