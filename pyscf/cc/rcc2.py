@@ -17,8 +17,6 @@ def update_t1(cc, t1, t2, eris):
     mo_e_v = eris.mo_energy[nocc:] + cc.level_shift
 
     fov = fock[:nocc,nocc:].copy()
-    foo = fock[:nocc,:nocc].copy()
-    fvv = fock[nocc:,nocc:].copy()
 
     Foo = imd.cc_Foo(t1,t2,eris)
     Fvv = imd.cc_Fvv(t1,t2,eris)
@@ -68,7 +66,6 @@ def update_t2(cc, t1, t2, eris):
 
     Foo = imd.cc_Foo(t1,t2,eris)
     Fvv = imd.cc_Fvv(t1,t2,eris)
-    Fov = imd.cc_Fov(t1,t2,eris)
 
     # Move energy terms to the other side
     Foo[np.diag_indices(nocc)] -= mo_e_o

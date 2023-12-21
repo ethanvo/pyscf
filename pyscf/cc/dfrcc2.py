@@ -4,6 +4,7 @@ from pyscf.lib import logger
 from pyscf import __config__
 from pyscf.cc import ccsd
 from pyscf.cc import rintermediates as imd
+from pyscf.ao2mo import _ao2mo
 
 BLKMIN = getattr(__config__, 'cc_ccsd_blkmin', 4)
 MEMORYMIN = getattr(__config__, 'cc_ccsd_memorymin', 2000)
@@ -17,8 +18,6 @@ def update_t1(cc, t1, t2, eris):
     mo_e_v = eris.mo_energy[nocc:] + cc.level_shift
 
     fov = fock[:nocc,nocc:].copy()
-    foo = fock[:nocc,:nocc].copy()
-    fvv = fock[nocc:,nocc:].copy()
 
     Foo = imd.cc_Foo(t1,t2,eris)
     Fvv = imd.cc_Fvv(t1,t2,eris)
@@ -28,6 +27,10 @@ def update_t1(cc, t1, t2, eris):
     Foo[np.diag_indices(nocc)] -= mo_e_o
     Fvv[np.diag_indices(nvir)] -= mo_e_v
 
+    Loo = eris.Loo
+    Lov = eris.Lov
+    Lvv = eris.Lvv
+
     # T1 equation
     t1new  =-2*np.einsum('kc,ka,ic->ia', fov, t1, t1)
     t1new +=   np.einsum('ac,ic->ia', Fvv, t1)
@@ -36,18 +39,16 @@ def update_t1(cc, t1, t2, eris):
     t1new +=  -np.einsum('kc,ikca->ia', Fov, t2)
     t1new +=   np.einsum('kc,ic,ka->ia', Fov, t1, t1)
     t1new += fov.conj()
-    t1new += 2*np.einsum('kcai,kc->ia', eris.ovvo, t1)
-    t1new +=  -np.einsum('kiac,kc->ia', eris.oovv, t1)
-    eris_ovvv = np.asarray(eris.get_ovvv())
-    t1new += 2*lib.einsum('kdac,ikcd->ia', eris_ovvv, t2)
-    t1new +=  -lib.einsum('kcad,ikcd->ia', eris_ovvv, t2)
-    t1new += 2*lib.einsum('kdac,kd,ic->ia', eris_ovvv, t1, t1)
-    t1new +=  -lib.einsum('kcad,kd,ic->ia', eris_ovvv, t1, t1)
-    eris_ovoo = np.asarray(eris.ovoo, order='C')
-    t1new +=-2*lib.einsum('lcki,klac->ia', eris_ovoo, t2)
-    t1new +=   lib.einsum('kcli,klac->ia', eris_ovoo, t2)
-    t1new +=-2*lib.einsum('lcki,lc,ka->ia', eris_ovoo, t1, t1)
-    t1new +=   lib.einsum('kcli,lc,ka->ia', eris_ovoo, t1, t1)
+    t1new += 2*np.einsum('Lkc,Lia,kc->ia', Lov, Lov, t1)
+    t1new +=  -np.einsum('Lki,Lac,kc->ia', Loo, Lvv, t1)
+    t1new += 2*lib.einsum('Lkd,Lac,ikcd->ia', Lov, Lvv, t2)
+    t1new +=  -lib.einsum('Lkc,Lad,ikcd->ia', Lov, Lvv, t2)
+    t1new += 2*lib.einsum('Lkd,Lac,kd,ic->ia', Lov, Lvv, t1, t1)
+    t1new +=  -lib.einsum('Lkc,Lad,kd,ic->ia', Lov, Lvv, t1, t1)
+    t1new +=-2*lib.einsum('Llc,Lki,klac->ia', Lov, Loo, t2)
+    t1new +=   lib.einsum('Lkc,Lli,klac->ia', Lov, Loo, t2)
+    t1new +=-2*lib.einsum('Llc,Lki,lc,ka->ia', Lov, Loo, t1, t1)
+    t1new +=   lib.einsum('Lkc,Lli,lc,ka->ia', Lov, Loo, t1, t1)
 
     eia = mo_e_o[:,None] - mo_e_v
     t1new /= eia
@@ -68,33 +69,33 @@ def update_t2(cc, t1, t2, eris):
 
     Foo = imd.cc_Foo(t1,t2,eris)
     Fvv = imd.cc_Fvv(t1,t2,eris)
-    Fov = imd.cc_Fov(t1,t2,eris)
 
     # Move energy terms to the other side
     Foo[np.diag_indices(nocc)] -= mo_e_o
     Fvv[np.diag_indices(nvir)] -= mo_e_v
 
-    eris_ovvv = np.asarray(eris.get_ovvv())
-    eris_ovoo = np.asarray(eris.ovoo, order='C')
+    Loo = eris.Loo
+    Lov = eris.Lov
+    Lvv = eris.Lvv
 
     # T2 equation
-    tmp2  = lib.einsum('kibc,ka->abic', eris.oovv, -t1)
-    tmp2 += np.asarray(eris_ovvv).conj().transpose(1,3,0,2)
+    tmp2  = lib.einsum('Lki,Lbc,ka->abic', Loo, Lvv, -t1)
+    tmp2 += lib.einsum('Lia,Lbc->acib', Lov, Lvv).conj()
     tmp = lib.einsum('abic,jc->ijab', tmp2, t1)
     t2new = tmp + tmp.transpose(1,0,3,2)
-    tmp2  = lib.einsum('kcai,jc->akij', eris.ovvo, t1)
-    tmp2 += eris_ovoo.transpose(1,3,0,2).conj()
+    tmp2  = lib.einsum('Lkc,Lia,jc->akij', Lov, Lov, t1)
+    tmp2 += lib.einsum('Lia,Ljk->akij', Lov, Loo).conj()
     tmp = lib.einsum('akij,kb->ijab', tmp2, t1)
     t2new -= tmp + tmp.transpose(1,0,3,2)
-    t2new += np.asarray(eris.ovov).conj().transpose(0,2,1,3)
-    Woooo2 = np.asarray(eris.oooo).transpose(0,2,1,3).copy()
-    Woooo2 += lib.einsum('lcki,jc->klij', eris_ovoo, t1)
-    Woooo2 += lib.einsum('kclj,ic->klij', eris_ovoo, t1)
-    Woooo2 += lib.einsum('kcld,ic,jd->klij', eris.ovov, t1, t1)
+    t2new += lib.einsum('Lia,Ljb->ijab', Lov, Lov).conj()
+    Woooo2 = lib.einsum('Lij,Lkl->ikjl', Loo, Loo)
+    Woooo2 += lib.einsum('Llc,Lki,jc->klij', Lov, Loo, t1)
+    Woooo2 += lib.einsum('Lkc,Llj,ic->klij', Lov, Loo, t1)
+    Woooo2 += lib.einsum('Lkc,Lld,ic,jd->klij', Lov, Lov, t1, t1)
     t2new += lib.einsum('klij,ka,lb->ijab', Woooo2, t1, t1)
-    Wvvvv = lib.einsum('kcbd,ka->abcd', eris_ovvv, -t1)
+    Wvvvv = lib.einsum('Lkc,Lbd,ka->abcd', Lov, Lvv, -t1)
     Wvvvv = Wvvvv + Wvvvv.transpose(1,0,3,2)
-    Wvvvv += np.asarray(imd._get_vvvv(eris)).transpose(0,2,1,3)
+    Wvvvv += lib.einsum('Lab,Lcd->acbd', Lvv, Lvv)
     t2new += lib.einsum('abcd,ic,jd->ijab', Wvvvv, t1, t1)
     Lvv2 = fvv - np.einsum('kc,ka->ac', fov, t1)
     Lvv2 -= np.diag(np.diag(fvv))
@@ -173,3 +174,56 @@ class DFRCC2(ccsd.CCSD):
     '''
     kernel = kernel
     update_amps = update_amps
+
+    def ao2mo(self, mo_coeff=None):
+        cput0 = (logger.process_clock(), logger.perf_counter())
+        log = logger.Logger(self.stdout, self.verbose)
+        eris = ccsd._ChemistsERIs()
+        eris._common_init_(self, mo_coeff)
+
+        mo_coeff = np.asarray(eris.mo_coeff, order='F')
+        nocc = eris.nocc
+        nao, nmo = mo_coeff.shape
+        nvir = nmo - nocc
+        nvir_pair = nvir*(nvir+1)//2
+
+        naux = self._scf.with_df.get_naoaux()
+        Loo = np.empty((naux,nocc,nocc))
+        Lov = np.empty((naux,nocc,nvir))
+        Lvo = np.empty((naux,nvir,nocc))
+        Lvv = np.empty((naux,nvir_pair))
+        ijslice = (0, nmo, 0, nmo)
+        Lpq = None
+        p1 = 0
+        for eri1 in self._scf.with_df.loop():
+            Lpq = _ao2mo.nr_e2(eri1, mo_coeff, ijslice, aosym='s2', out=Lpq).reshape(-1,nmo,nmo)
+            p0, p1 = p1, p1 + Lpq.shape[0]
+            Loo[p0:p1] = Lpq[:,:nocc,:nocc]
+            Lov[p0:p1] = Lpq[:,:nocc,nocc:]
+            Lvo[p0:p1] = Lpq[:,nocc:,:nocc]
+            Lvv[p0:p1] = lib.pack_tril(Lpq[:,nocc:,nocc:].reshape(-1,nvir,nvir))
+        Loo = Loo.reshape(naux,nocc*nocc)
+        Lov = Lov.reshape(naux,nocc*nvir)
+        Lvo = Lvo.reshape(naux,nocc*nvir)
+
+        eris.feri1 = lib.H5TmpFile()
+        eris.oooo = eris.feri1.create_dataset('oooo', (nocc,nocc,nocc,nocc), 'f8')
+        eris.oovv = eris.feri1.create_dataset('oovv', (nocc,nocc,nvir,nvir), 'f8', chunks=(nocc,nocc,1,nvir))
+        eris.ovoo = eris.feri1.create_dataset('ovoo', (nocc,nvir,nocc,nocc), 'f8', chunks=(nocc,1,nocc,nocc))
+        eris.ovvo = eris.feri1.create_dataset('ovvo', (nocc,nvir,nvir,nocc), 'f8', chunks=(nocc,1,nvir,nocc))
+        eris.ovov = eris.feri1.create_dataset('ovov', (nocc,nvir,nocc,nvir), 'f8', chunks=(nocc,1,nocc,nvir))
+        eris.ovvv = eris.feri1.create_dataset('ovvv', (nocc,nvir,nvir_pair), 'f8')
+        eris.vvvv = eris.feri1.create_dataset('vvvv', (nvir_pair,nvir_pair), 'f8')
+        eris.oooo[:] = lib.ddot(Loo.T, Loo).reshape(nocc,nocc,nocc,nocc)
+        eris.ovoo[:] = lib.ddot(Lov.T, Loo).reshape(nocc,nvir,nocc,nocc)
+        eris.oovv[:] = lib.unpack_tril(lib.ddot(Loo.T, Lvv)).reshape(nocc,nocc,nvir,nvir)
+        eris.ovvo[:] = lib.ddot(Lov.T, Lvo).reshape(nocc,nvir,nvir,nocc)
+        eris.ovov[:] = lib.ddot(Lov.T, Lov).reshape(nocc,nvir,nocc,nvir)
+        eris.ovvv[:] = lib.ddot(Lov.T, Lvv).reshape(nocc,nvir,nvir_pair)
+        eris.vvvv[:] = lib.ddot(Lvv.T, Lvv)
+        eris.Loo = Loo.reshape(naux,nocc,nocc)
+        eris.Lov = Lov.reshape(naux,nocc,nvir)
+        eris.Lvo = Lvo.reshape(naux,nvir,nocc)
+        eris.Lvv = lib.unpack_tril(Lvv).reshape(naux,nvir,nvir)
+        log.timer('CCSD integral transformation', *cput0)
+        return eris
