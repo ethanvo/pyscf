@@ -9,7 +9,32 @@ from pyscf.ao2mo import _ao2mo
 BLKMIN = getattr(__config__, 'cc_ccsd_blkmin', 4)
 MEMORYMIN = getattr(__config__, 'cc_ccsd_memorymin', 2000)
 
-def update_t1(cc, t1, t2, eris):
+def energy(mycc, t1=None, eris=None):
+    '''CCSD correlation energy'''
+    if t1 is None: t1 = mycc.t1
+    if eris is None: eris = mycc.ao2mo()
+
+    nocc, nvir = t1.shape
+    fock = eris.fock
+    mo_e_o = eris.mo_energy[:nocc]
+    mo_e_v = eris.mo_energy[nocc:] + mycc.level_shift
+    eia = mo_e_o[:,None] - mo_e_v
+    Lov = eris.Lov
+    Bov = make_Bov(mycc, t1, eris)
+    e = np.einsum('ia,ia', fock[:nocc,nocc:], t1) * 2
+    for i in range(nocc):
+        t2i  =   lib.einsum('La,Ljb->jab', Bov[:, i, :], Bov)
+        ejab = lib.direct_sum('a,jb->jab', eia[i, :], eia)
+        t2i /= ejab
+        taui = t2i + lib.einsum('a,jb->jab', t1[i, :], t1)
+        e   += 2*lib.einsum('jab,La,Ljb', taui, Lov[:, i, :], Lov)
+        e   -=   lib.einsum('iab,Lia,Lb', taui, Lov, Lov[:, i, :])
+
+    if abs(e.imag) > 1e-4:
+        logger.warn(mycc, 'Non-zero imaginary part found in CCSD energy %s', e)
+    return e.real
+
+def update_t1(cc, t1, eris):
     # Ref: Hirata et al., J. Chem. Phys. 120, 2581 (2004) Eqs.(35)-(36)
     assert(isinstance(eris, ccsd._ChemistsERIs))
     nocc, nvir = t1.shape
@@ -17,38 +42,67 @@ def update_t1(cc, t1, t2, eris):
     mo_e_o = eris.mo_energy[:nocc]
     mo_e_v = eris.mo_energy[nocc:] + cc.level_shift
 
-    fov = fock[:nocc,nocc:].copy()
-
-    Foo = imd.cc_Foo(t1,t2,eris)
-    Fvv = imd.cc_Fvv(t1,t2,eris)
-    Fov = imd.cc_Fov(t1,t2,eris)
-
-    # Move energy terms to the other side
-    Foo[np.diag_indices(nocc)] -= mo_e_o
-    Fvv[np.diag_indices(nvir)] -= mo_e_v
+    eia = mo_e_o[:,None] - mo_e_v
 
     Loo = eris.Loo
     Lov = eris.Lov
     Lvv = eris.Lvv
 
-    eia = mo_e_o[:,None] - mo_e_v
-    
+    Bov = make_Bov(cc, t1, eris)
+
+    foo = fock[:nocc,:nocc].copy()
+    fov = fock[:nocc,nocc:].copy()
+    fvv = fock[nocc:,nocc:].copy()
+
+    Fki = np.zeros_like(foo)
+    Fac = np.zeros_like(fvv)
+    Fkc = np.zeros_like(fov)
+    for i in range(nocc):
+        t2i        =   lib.einsum('La,Ljb->jab', Bov[:, i, :], Bov)
+        ejab       = lib.direct_sum('a,jb->jab', eia[i, :], eia)
+        t2i       /= ejab
+        Fki[:, i] += 2*lib.einsum('Lkc,Lld,lcd->k', Lov, Lov, t2i)
+        Fki[:, i] -=   lib.einsum('Lkd,Llc,lcd->k', Lov, Lov, t2i)
+        Fac       +=-2*lib.einsum('Lc,Lld,lad->ac', Lov[:, i, :], Lov, t2i)
+        Fac       +=   lib.einsum('Ld,Llc,lad->ac', Lov[:, i, :], Lov, t2i)
+    Fki += 2*lib.einsum('Lkc,Lld,ic,ld->ki', Lov, Lov, t1, t1)
+    Fki -=   lib.einsum('Lkd,Llc,ic,ld->ki', Lov, Lov, t1, t1)
+    Fac -= 2*lib.einsum('Lkc,Lld,ka,ld->ac', Lov, Lov, t1, t1)
+    Fac +=   lib.einsum('Lkd,Llc,ka,ld->ac', Lov, Lov, t1, t1)
+    Fkc  = 2*np.einsum('Lkc,Lld,ld->kc', Lov, Lov, t1)
+    Fkc -=   np.einsum('Lkd,Llc,ld->kc', Lov, Lov, t1)
+    Fki += foo
+    Fac += fvv
+    Fkc += fov
+    Foo = Fki
+    Fvv = Fac
+    Fov = Fkc
+
+    # Move energy terms to the other side
+    Foo[np.diag_indices(nocc)] -= mo_e_o
+    Fvv[np.diag_indices(nvir)] -= mo_e_v
+
     # T1 equation
     t1new  =-2*np.einsum('kc,ka,ic->ia', fov, t1, t1)
     t1new +=   np.einsum('ac,ic->ia', Fvv, t1)
     t1new +=  -np.einsum('ki,ka->ia', Foo, t1)
-    t1new += 2*np.einsum('kc,kica->ia', Fov, t2)
-    t1new +=  -np.einsum('kc,ikca->ia', Fov, t2)
+    for i in range(nocc):
+        t2i          =   lib.einsum('La,Ljb->jab', Bov[:, i, :], Bov)
+        ejab = lib.direct_sum('a,jb->jab', eia[i, :], eia)
+        t2i /= ejab
+        t1new       += 2*lib.einsum('c,ica->ia', Fov[i, :], t2i)
+        t1new[i, :] +=  -lib.einsum('kc,kca->a', Fov, t2i)
+        t1new[i, :] += 2*lib.einsum('Lkd,Lac,kcd->a', Lov, Lvv, t2i)
+        t1new[i, :] +=  -lib.einsum('Lkc,Lad,kcd->a', Lov, Lvv, t2i)
+        t1new       +=-2*lib.einsum('Llc,Li,lac->ia', Lov, Loo[:, i, :], t2i)
+        t1new       +=   lib.einsum('Lc,Lli,lac->ia', Lov[:, i, :], Loo, t2i)
+
     t1new +=   np.einsum('kc,ic,ka->ia', Fov, t1, t1)
     t1new += fov.conj()
     t1new += 2*np.einsum('Lkc,Lia,kc->ia', Lov, Lov, t1)
     t1new +=  -np.einsum('Lki,Lac,kc->ia', Loo, Lvv, t1)
-    t1new += 2*lib.einsum('Lkd,Lac,ikcd->ia', Lov, Lvv, t2)
-    t1new +=  -lib.einsum('Lkc,Lad,ikcd->ia', Lov, Lvv, t2)
     t1new += 2*lib.einsum('Lkd,Lac,kd,ic->ia', Lov, Lvv, t1, t1)
     t1new +=  -lib.einsum('Lkc,Lad,kd,ic->ia', Lov, Lvv, t1, t1)
-    t1new +=-2*lib.einsum('Llc,Lki,klac->ia', Lov, Loo, t2)
-    t1new +=   lib.einsum('Lkc,Lli,klac->ia', Lov, Loo, t2)
     t1new +=-2*lib.einsum('Llc,Lki,lc,ka->ia', Lov, Loo, t1, t1)
     t1new +=   lib.einsum('Lkc,Lli,lc,ka->ia', Lov, Loo, t1, t1)
 
@@ -56,62 +110,25 @@ def update_t1(cc, t1, t2, eris):
 
     return t1new
 
-def update_t2(cc, t1, t2, eris):
-    # Ref: Hirata et al., J. Chem. Phys. 120, 2581 (2004) Eqs.(35)-(36)
-    assert(isinstance(eris, ccsd._ChemistsERIs))
-    nocc, nvir = t1.shape
-    fock = eris.fock
-    mo_e_o = eris.mo_energy[:nocc]
-    mo_e_v = eris.mo_energy[nocc:] + cc.level_shift
-
-    fov = fock[:nocc,nocc:].copy()
-    foo = fock[:nocc,:nocc].copy()
-    fvv = fock[nocc:,nocc:].copy()
-
-    Foo = imd.cc_Foo(t1,t2,eris)
-    Fvv = imd.cc_Fvv(t1,t2,eris)
-
-    # Move energy terms to the other side
-    Foo[np.diag_indices(nocc)] -= mo_e_o
-    Fvv[np.diag_indices(nvir)] -= mo_e_v
-
-    Loo = eris.Loo
-    Lov = eris.Lov
-    Lvv = eris.Lvv
-
-    # T2 equation
-    tmp2  = lib.einsum('Lki,Lbc,ka->abic', Loo, Lvv, -t1)
-    tmp2 += lib.einsum('Lia,Lbc->acib', Lov, Lvv).conj()
-    tmp = lib.einsum('abic,jc->ijab', tmp2, t1)
-    t2new = tmp + tmp.transpose(1,0,3,2)
-    tmp2  = lib.einsum('Lkc,Lia,jc->akij', Lov, Lov, t1)
-    tmp2 += lib.einsum('Lia,Ljk->akij', Lov, Loo).conj()
-    tmp = lib.einsum('akij,kb->ijab', tmp2, t1)
-    t2new -= tmp + tmp.transpose(1,0,3,2)
-    t2new += lib.einsum('Lia,Ljb->ijab', Lov, Lov).conj()
-    Woooo2 = lib.einsum('Lij,Lkl->ikjl', Loo, Loo)
-    Woooo2 += lib.einsum('Llc,Lki,jc->klij', Lov, Loo, t1)
-    Woooo2 += lib.einsum('Lkc,Llj,ic->klij', Lov, Loo, t1)
-    Woooo2 += lib.einsum('Lkc,Lld,ic,jd->klij', Lov, Lov, t1, t1)
-    t2new += lib.einsum('klij,ka,lb->ijab', Woooo2, t1, t1)
-    Wvvvv = lib.einsum('Lkc,Lbd,ka->abcd', Lov, Lvv, -t1)
-    Wvvvv = Wvvvv + Wvvvv.transpose(1,0,3,2)
-    Wvvvv += lib.einsum('Lab,Lcd->acbd', Lvv, Lvv)
-    t2new += lib.einsum('abcd,ic,jd->ijab', Wvvvv, t1, t1)
-    Lvv2 = fvv - np.einsum('kc,ka->ac', fov, t1)
-    Lvv2 -= np.diag(np.diag(fvv))
-    tmp = lib.einsum('ac,ijcb->ijab', Lvv2, t2)
-    t2new += (tmp + tmp.transpose(1,0,3,2))
-    Loo2 = foo + np.einsum('kc,ic->ki', fov, t1)
-    Loo2 -= np.diag(np.diag(foo))
-    tmp = lib.einsum('ki,kjab->ijab', Loo2, t2)
-    t2new -= (tmp + tmp.transpose(1,0,3,2))
-
-    eia = mo_e_o[:,None] - mo_e_v
-    eijab = lib.direct_sum('ia,jb->ijab',eia,eia)
-    t2new /= eijab
-
-    return t2new
+def make_Bov(cc, t1, eris):
+    nocc = eris.nocc
+    nmo = eris.fock.shape[0]
+    nvir = nmo - nocc
+    naux = cc._scf.with_df.get_naoaux()
+    C = eris.mo_coeff.copy()
+    X = C[:, nocc:] - lib.einsum('ui,ia->ua', C[:, :nocc], t1)
+    Y = C[:, :nocc] + lib.einsum('ua,ia->ui', C[:, nocc:], t1)
+    C[:, :nocc] = Y
+    C[:, nocc:] = X
+    Bov = np.empty((naux,nocc,nvir))
+    ijslice = (0, nmo, 0, nmo)
+    Lpq = None
+    p1 = 0
+    for eri1 in cc._scf.with_df.loop():
+        Lpq = _ao2mo.nr_e2(eri1, C, ijslice, aosym='s2', out=Lpq).reshape(-1,nmo,nmo)
+        p0, p1 = p1, p1 + Lpq.shape[0]
+        Bov[p0:p1] = Lpq[:,:nocc,nocc:]
+    return Bov
 
 def make_t2(cc, t1, eris):
     nocc = eris.nocc
@@ -139,15 +156,9 @@ def make_t2(cc, t1, eris):
     t2 /= eijab
     return t2
 
-def update_amps(cc, t1, t2, eris):
-    t2 = make_t2(cc, t1, eris)
-    t1new = update_t1(cc, t1, t2, eris)
-    t2new = make_t2(cc, t1new, eris)
-    # Compare t2_t1 with t2
-    print("T2 COMPARE")
-    #print(np.allclose(t2_t1, t2))
-    #t2new = update_t2(cc, t1, t2, eris)
-    return t1new, t2new
+def update_amps(cc, t1, eris):
+    t1new = update_t1(cc, t1, eris)
+    return t1new
 
 # t1: ia
 # t2: ijab
@@ -156,14 +167,17 @@ def kernel(mycc, eris=None, t1=None, t2=None, max_cycle=50, tol=1e-8,
     log = logger.new_logger(mycc, verbose)
     if eris is None:
         eris = mycc.ao2mo(mycc.mo_coeff)
-    if t1 is None and t2 is None:
-        t1, t2 = mycc.get_init_guess(eris)
-    elif t2 is None:
-        t2 = mycc.get_init_guess(eris)[1]
+    if t1 is None:
+        mo_e = eris.mo_energy
+        nocc = mycc.nocc
+        eia = mo_e[:nocc,None] - mo_e[None,nocc:]
+        t1 = eris.fock[:nocc,nocc:] / eia
+    if t2 is None:
+        t2 = make_t2(mycc, t1, eris)
 
     cput1 = cput0 = (logger.process_clock(), logger.perf_counter())
     eold = 0
-    eccsd = mycc.energy(t1, t2, eris)
+    eccsd = mycc.energy(t1, eris)
     log.info('Init E_corr(CCSD) = %.15g', eccsd)
 
     if isinstance(mycc.diis, lib.diis.DIIS):
@@ -176,7 +190,8 @@ def kernel(mycc, eris=None, t1=None, t2=None, max_cycle=50, tol=1e-8,
 
     conv = False
     for istep in range(max_cycle):
-        t1new, t2new = mycc.update_amps(t1, t2, eris)
+        t1new = mycc.update_amps(t1, eris)
+        t2new = make_t2(mycc, t1new, eris)
         tmpvec = mycc.amplitudes_to_vector(t1new, t2new)
         tmpvec -= mycc.amplitudes_to_vector(t1, t2)
         normt = np.linalg.norm(tmpvec)
@@ -189,7 +204,7 @@ def kernel(mycc, eris=None, t1=None, t2=None, max_cycle=50, tol=1e-8,
         t1, t2 = t1new, t2new
         t1new = t2new = None
         t1, t2 = mycc.run_diis(t1, t2, istep, normt, eccsd-eold, adiis)
-        eold, eccsd = eccsd, mycc.energy(t1, t2, eris)
+        eold, eccsd = eccsd, mycc.energy(t1, eris)
         log.info('cycle = %d  E_corr(CCSD) = %.15g  dE = %.9g  norm(t1,t2) = %.6g',
                  istep+1, eccsd, eccsd - eold, normt)
         cput1 = log.timer('CCSD iter', *cput1)
@@ -198,15 +213,84 @@ def kernel(mycc, eris=None, t1=None, t2=None, max_cycle=50, tol=1e-8,
             break
     log.timer('CCSD', *cput0)
     return conv, eccsd, t1, t2
+'''
+def kernel(mycc, eris=None, t1=None, max_cycle=50, tol=1e-8,
+           tolnormt=1e-6, verbose=None):
+    log = logger.new_logger(mycc, verbose)
+    if eris is None:
+        eris = mycc.ao2mo(mycc.mo_coeff)
+    if t1 is None:
+        mo_e = eris.mo_energy
+        nocc = mycc.nocc
+        eia = mo_e[:nocc,None] - mo_e[None,nocc:]
+        t1 = eris.fock[:nocc,nocc:] / eia
 
+    cput1 = cput0 = (logger.process_clock(), logger.perf_counter())
+    eold = 0
+#    t2 = make_t2(mycc, t1, eris)
+    eccsd = mycc.energy(t1, eris)
+    log.info('Init E_corr(CCSD) = %.15g', eccsd)
+
+    if isinstance(mycc.diis, lib.diis.DIIS):
+        adiis = mycc.diis
+    elif mycc.diis:
+        adiis = lib.diis.DIIS(mycc, mycc.diis_file, incore=mycc.incore_complete)
+        adiis.space = mycc.diis_space
+    else:
+        adiis = None
+
+    conv = False
+    for istep in range(max_cycle):
+        t1new = mycc.update_amps(t1,  eris)
+        tmpvec = mycc.amplitudes_to_vector(t1new)
+        tmpvec -= mycc.amplitudes_to_vector(t1)
+        normt = np.linalg.norm(tmpvec)
+        normt += np.linalg.norm(make_t2(mycc, t1new, eris).ravel() - make_t2(mycc, t1, eris).ravel())
+        tmpvec = None
+        if mycc.iterative_damping < 1.0:
+            alpha = mycc.iterative_damping
+            t1new = (1-alpha) * t1 + alpha * t1new
+        t1 = t1new
+        t1new = None
+        t1 = mycc.run_diis(t1, istep, normt, eccsd-eold, adiis)
+        eold, eccsd = eccsd, mycc.energy(t1, eris)
+        log.info('cycle = %d  E_corr(CCSD) = %.15g  dE = %.9g  norm(t1,t2) = %.6g',
+                 istep+1, eccsd, eccsd - eold, normt)
+        cput1 = log.timer('CCSD iter', *cput1)
+        if abs(eccsd-eold) < tol and normt < tolnormt:
+            conv = True
+            break
+    log.timer('CCSD', *cput0)
+    return conv, eccsd, t1
+'''
 class DFRCC2(ccsd.CCSD):
     '''restricted CCSD with IP-EOM, EA-EOM, EE-EOM, and SF-EOM capabilities
 
     Ground-state CCSD is performed in optimized ccsd.CCSD and EOM is performed here.
     '''
+    energy = energy
     kernel = kernel
     update_amps = update_amps
+    '''
+    def amplitudes_to_vector(self, t1, out=None):
+        vector = np.ndarray(t1.size, t1.dtype, buffer=out)
+        vector = t1.ravel()
+        return vector
+    
+    def vector_to_amplitudes(self, vector, nmo=None, nocc=None):
+        if nocc is None: nocc = self.nocc
+        if nmo is None: nmo = self.nmo
+        return vector.reshape(nocc,nmo-nocc)
 
+    def run_diis(self, t1, istep, normt, de, adiis):
+        if (adiis and
+            istep >= self.diis_start_cycle and
+            abs(de) < self.diis_start_energy_diff):
+            vec = self.amplitudes_to_vector(t1)
+            t1 = self.vector_to_amplitudes(adiis.update(vec))
+            logger.debug1(self, 'DIIS for step %d', istep)
+        return t1
+    '''
     def ao2mo(self, mo_coeff=None):
         cput0 = (logger.process_clock(), logger.perf_counter())
         log = logger.Logger(self.stdout, self.verbose)
