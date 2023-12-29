@@ -456,9 +456,17 @@ def Wvvvo(t1, t2, eris, kconserv, _Wvvvv=None, out=None):
 def Wovoo(t1, t2, eris, kconserv, out=None):
     nkpts, nocc, nvir = t1.shape
 
-    WW1ovov = W1ovov(t1,t2,eris,kconserv)
+    if out is None:
+        WW1ovov_dest = None
+        WW1ovvo_dest = None
+    else:
+        ftmp = lib.H5TmpFile()
+        WW1ovov_dest = ftmp.create_dataset('WW1ovov', (nkpts,nkpts,nkpts,nocc,nvir,nocc,nvir), t1.dtype)
+        WW1ovvo_dest = ftmp.create_dataset('WW1ovvo', (nkpts,nkpts,nkpts,nocc,nvir,nvir,nocc), t1.dtype)
+
+    WW1ovov = W1ovov(t1,t2,eris,kconserv,WW1ovov_dest)
     WWoooo = Woooo(t1,t2,eris,kconserv)
-    WW1ovvo = W1ovvo(t1,t2,eris,kconserv)
+    WW1ovvo = W1ovvo(t1,t2,eris,kconserv,WW1ovvo_dest)
     FFov = cc_Fov(t1,t2,eris,kconserv)
 
     Wkbij = _new((nkpts,nkpts,nkpts,nocc,nvir,nocc,nocc), t1.dtype, out)
