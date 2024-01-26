@@ -12,42 +12,18 @@ MEMORYMIN = getattr(__config__, 'cc_ccsd_memorymin', 2000)
 def make_t2(cc, t1, eris):
     assert(isinstance(eris, ccsd._ChemistsERIs))
     nocc, nvir = t1.shape
-    fock = eris.fock
     mo_e_o = eris.mo_energy[:nocc]
     mo_e_v = eris.mo_energy[nocc:] + cc.level_shift
 
-    fov = fock[:nocc,nocc:].copy()
+    C = eris.mo_coeff.copy()
+    X = C[:, nocc:] - lib.einsum('ui,ia->ua', C[:, :nocc], t1)
+    Y = C[:, :nocc] + lib.einsum('ua,ia->ui', C[:, nocc:], t1)
+    C[:, :nocc] = Y
+    C[:, nocc:] = X
 
-    eris_ovvv = np.asarray(eris.get_ovvv())
-    eris_ovoo = np.asarray(eris.ovoo, order='C')
+    t1_eris = cc.ao2mo(mo_coeff=C)
+    t2 = np.asarray(t1_eris.ovov).transpose(0,2,1,3)
 
-    tmp2  = lib.einsum('kibc,ka->abic', eris.oovv, -t1)
-    tmp2 += np.asarray(eris_ovvv).conj().transpose(1,3,0,2)
-    tmp = lib.einsum('abic,jc->ijab', tmp2, t1)
-    t2 = tmp + tmp.transpose(1,0,3,2)
-    tmp2  = lib.einsum('kcai,jc->akij', eris.ovvo, t1)
-    tmp2 += eris_ovoo.transpose(1,3,0,2).conj()
-    tmp = lib.einsum('akij,kb->ijab', tmp2, t1)
-    t2 -= tmp + tmp.transpose(1,0,3,2)
-    t2 += np.asarray(eris.ovov).conj().transpose(0,2,1,3)
-    Woooo2 = np.asarray(eris.oooo).transpose(0,2,1,3).copy()
-    Woooo2 += lib.einsum('lcki,jc->klij', eris_ovoo, t1)
-    Woooo2 += lib.einsum('kclj,ic->klij', eris_ovoo, t1)
-    Woooo2 += lib.einsum('kcld,ic,jd->klij', eris.ovov, t1, t1)
-    t2 += lib.einsum('klij,ka,lb->ijab', Woooo2, t1, t1)
-    Wvvvv = lib.einsum('kcbd,ka->abcd', eris_ovvv, -t1)
-    Wvvvv = Wvvvv + Wvvvv.transpose(1,0,3,2)
-    Wvvvv += np.asarray(imd._get_vvvv(eris)).transpose(0,2,1,3)
-    t2 += lib.einsum('abcd,ic,jd->ijab', Wvvvv, t1, t1)
-    # All of this can be ignored, since fov is zero and foo/fvv are diagonal
-    #Lvv2 = fvv - np.einsum('kc,ka->ac', fov, t1)
-    #Lvv2 -= np.diag(np.diag(fvv))
-    #tmp = lib.einsum('ac,ijcb->ijab', Lvv2, t2)
-    #t2new += (tmp + tmp.transpose(1,0,3,2))
-    #Loo2 = foo + np.einsum('kc,ic->ki', fov, t1)
-    #Loo2 -= np.diag(np.diag(foo))
-    #tmp = lib.einsum('ki,kjab->ijab', Loo2, t2)
-    #t2new -= (tmp + tmp.transpose(1,0,3,2))
     eia = mo_e_o[:,None] - mo_e_v
     eijab = lib.direct_sum('ia,jb->ijab',eia,eia)
     t2 /= eijab
@@ -146,7 +122,7 @@ def kernel(mycc, eris=None, t1=None, max_cycle=50, tol=1e-8,
     log.timer('CC2', *cput0)
     return conv, eccsd, t1
 
-class RCC2(ccsd.CCSD):
+class RCC2_T2FREE(ccsd.CCSD):
     '''restricted CC2
     '''
     kernel = kernel

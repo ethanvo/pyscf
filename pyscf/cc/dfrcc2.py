@@ -162,74 +162,18 @@ def update_amps(cc, t1, eris):
 
 # t1: ia
 # t2: ijab
-def kernel(mycc, eris=None, t1=None, t2=None, max_cycle=50, tol=1e-8,
-           tolnormt=1e-6, verbose=None):
-    log = logger.new_logger(mycc, verbose)
-    if eris is None:
-        eris = mycc.ao2mo(mycc.mo_coeff)
-    if t1 is None:
-        mo_e = eris.mo_energy
-        nocc = mycc.nocc
-        eia = mo_e[:nocc,None] - mo_e[None,nocc:]
-        t1 = eris.fock[:nocc,nocc:] / eia
-    if t2 is None:
-        t2 = make_t2(mycc, t1, eris)
-
-    cput1 = cput0 = (logger.process_clock(), logger.perf_counter())
-    eold = 0
-    eccsd = mycc.energy(t1, eris)
-    log.info('Init E_corr(CCSD) = %.15g', eccsd)
-
-    if isinstance(mycc.diis, lib.diis.DIIS):
-        adiis = mycc.diis
-    elif mycc.diis:
-        adiis = lib.diis.DIIS(mycc, mycc.diis_file, incore=mycc.incore_complete)
-        adiis.space = mycc.diis_space
-    else:
-        adiis = None
-
-    conv = False
-    for istep in range(max_cycle):
-        t1new = mycc.update_amps(t1, eris)
-        t2new = make_t2(mycc, t1new, eris)
-        tmpvec = mycc.amplitudes_to_vector(t1new, t2new)
-        tmpvec -= mycc.amplitudes_to_vector(t1, t2)
-        normt = np.linalg.norm(tmpvec)
-        tmpvec = None
-        if mycc.iterative_damping < 1.0:
-            alpha = mycc.iterative_damping
-            t1new = (1-alpha) * t1 + alpha * t1new
-            t2new *= alpha
-            t2new += (1-alpha) * t2
-        t1, t2 = t1new, t2new
-        t1new = t2new = None
-        t1, t2 = mycc.run_diis(t1, t2, istep, normt, eccsd-eold, adiis)
-        eold, eccsd = eccsd, mycc.energy(t1, eris)
-        log.info('cycle = %d  E_corr(CCSD) = %.15g  dE = %.9g  norm(t1,t2) = %.6g',
-                 istep+1, eccsd, eccsd - eold, normt)
-        cput1 = log.timer('CCSD iter', *cput1)
-        if abs(eccsd-eold) < tol and normt < tolnormt:
-            conv = True
-            break
-    log.timer('CCSD', *cput0)
-    return conv, eccsd, t1, t2
-'''
 def kernel(mycc, eris=None, t1=None, max_cycle=50, tol=1e-8,
            tolnormt=1e-6, verbose=None):
     log = logger.new_logger(mycc, verbose)
     if eris is None:
         eris = mycc.ao2mo(mycc.mo_coeff)
     if t1 is None:
-        mo_e = eris.mo_energy
-        nocc = mycc.nocc
-        eia = mo_e[:nocc,None] - mo_e[None,nocc:]
-        t1 = eris.fock[:nocc,nocc:] / eia
+        t1 = mycc.get_init_guess(eris)[0]
 
     cput1 = cput0 = (logger.process_clock(), logger.perf_counter())
     eold = 0
-#    t2 = make_t2(mycc, t1, eris)
     eccsd = mycc.energy(t1, eris)
-    log.info('Init E_corr(CCSD) = %.15g', eccsd)
+    log.info('Init E_corr(CC2) = %.15g', eccsd)
 
     if isinstance(mycc.diis, lib.diis.DIIS):
         adiis = mycc.diis
@@ -241,28 +185,26 @@ def kernel(mycc, eris=None, t1=None, max_cycle=50, tol=1e-8,
 
     conv = False
     for istep in range(max_cycle):
-        t1new = mycc.update_amps(t1,  eris)
-        tmpvec = mycc.amplitudes_to_vector(t1new)
-        tmpvec -= mycc.amplitudes_to_vector(t1)
+        t1new = mycc.update_t1(t1, eris)
+        tmpvec = t1new.ravel() - t1.ravel()
         normt = np.linalg.norm(tmpvec)
-        normt += np.linalg.norm(make_t2(mycc, t1new, eris).ravel() - make_t2(mycc, t1, eris).ravel())
         tmpvec = None
         if mycc.iterative_damping < 1.0:
             alpha = mycc.iterative_damping
             t1new = (1-alpha) * t1 + alpha * t1new
         t1 = t1new
-        t1new = None
+        #t1new = t2new = None
         t1 = mycc.run_diis(t1, istep, normt, eccsd-eold, adiis)
         eold, eccsd = eccsd, mycc.energy(t1, eris)
-        log.info('cycle = %d  E_corr(CCSD) = %.15g  dE = %.9g  norm(t1,t2) = %.6g',
+        log.info('cycle = %d  E_corr(CC2) = %.15g  dE = %.9g  norm(t1) = %.6g',
                  istep+1, eccsd, eccsd - eold, normt)
-        cput1 = log.timer('CCSD iter', *cput1)
+        cput1 = log.timer('CC2 iter', *cput1)
         if abs(eccsd-eold) < tol and normt < tolnormt:
             conv = True
             break
-    log.timer('CCSD', *cput0)
+    log.timer('CC2', *cput0)
     return conv, eccsd, t1
-'''
+
 class DFRCC2(ccsd.CCSD):
     '''restricted CCSD with IP-EOM, EA-EOM, EE-EOM, and SF-EOM capabilities
 
@@ -270,27 +212,19 @@ class DFRCC2(ccsd.CCSD):
     '''
     energy = energy
     kernel = kernel
-    update_amps = update_amps
-    '''
-    def amplitudes_to_vector(self, t1, out=None):
-        vector = np.ndarray(t1.size, t1.dtype, buffer=out)
-        vector = t1.ravel()
-        return vector
+    update_t1 = update_t1
+    make_t2 = make_t2
     
-    def vector_to_amplitudes(self, vector, nmo=None, nocc=None):
-        if nocc is None: nocc = self.nocc
-        if nmo is None: nmo = self.nmo
-        return vector.reshape(nocc,nmo-nocc)
-
     def run_diis(self, t1, istep, normt, de, adiis):
+        nocc, nvir = t1.shape
         if (adiis and
             istep >= self.diis_start_cycle and
             abs(de) < self.diis_start_energy_diff):
-            vec = self.amplitudes_to_vector(t1)
-            t1 = self.vector_to_amplitudes(adiis.update(vec))
+            vec = t1.ravel() 
+            t1 = adiis.update(vec).reshape((nocc, nvir))
             logger.debug1(self, 'DIIS for step %d', istep)
         return t1
-    '''
+    
     def ao2mo(self, mo_coeff=None):
         cput0 = (logger.process_clock(), logger.perf_counter())
         log = logger.Logger(self.stdout, self.verbose)
