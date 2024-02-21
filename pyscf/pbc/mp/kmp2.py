@@ -97,7 +97,7 @@ def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
     if with_t2:
         if mem_usage > mem_avail:
             ft2 = lib.H5TmpFile()
-            t2 = ft2.create_dataset('t2', (nkpts, nkpts, nkpts, nocc, nocc, nvir, nvir), dtype=complex)
+            t2 = ft2.create_dataset('t2', (nkpts, nkpts, nkpts, nocc, nocc, nvir, nvir), dtype=complex)[:]
 #            raise MemoryError('Insufficient memory! MP2 memory usage %d MB (currently available %d MB)'
 #                            % (mem_usage, mem_avail))
         else:
