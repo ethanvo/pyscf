@@ -97,7 +97,7 @@ def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
     if with_t2:
         if mem_usage > mem_avail:
             ft2 = lib.H5TmpFile()
-            t2 = ft2.create_dataset('t2', (nkpts, nkpts, nkpts, nocc, nocc, nvir, nvir), dtype=complex)[:]
+            t2 = ft2.create_dataset('t2', (nkpts, nkpts, nkpts, nocc, nocc, nvir, nvir), dtype=complex)
 #            raise MemoryError('Insufficient memory! MP2 memory usage %d MB (currently available %d MB)'
 #                            % (mem_usage, mem_avail))
         else:
@@ -682,10 +682,10 @@ def _gamma1_intermediates(mp, t2=None):
             for ka in range(nkpts):
                 kb = mp.khelper.kconserv[ki, ka, kj]
 
-                dm1vir[kb] += einsum('ijax,ijay->yx', t2[ki][kj][ka].conj(), t2[ki][kj][ka]) * 2 -\
-                              einsum('ijax,ijya->yx', t2[ki][kj][ka].conj(), t2[ki][kj][kb])
-                dm1occ[kj] += einsum('ixab,iyab->xy', t2[ki][kj][ka].conj(), t2[ki][kj][ka]) * 2 -\
-                              einsum('ixab,iyba->xy', t2[ki][kj][ka].conj(), t2[ki][kj][kb])
+                dm1vir[kb] += einsum('ijax,ijay->yx', np.asarray(t2[ki][kj][ka]).conj(), np.asarray(t2[ki][kj][ka])) * 2 -\
+                              einsum('ijax,ijya->yx', np.asarray(t2[ki][kj][ka]).conj(), np.asarray(t2[ki][kj][kb]))
+                dm1occ[kj] += einsum('ixab,iyab->xy', np.asarray(t2[ki][kj][ka]).conj(), np.asarray(t2[ki][kj][ka])) * 2 -\
+                              einsum('ixab,iyba->xy', np.asarray(t2[ki][kj][ka]).conj(), np.asarray(t2[ki][kj][kb]))
     return -dm1occ, dm1vir
 
 
