@@ -681,11 +681,12 @@ def _gamma1_intermediates(mp, t2=None):
         for kj in range(nkpts):
             for ka in range(nkpts):
                 kb = mp.khelper.kconserv[ki, ka, kj]
-
-                dm1vir[kb] += einsum('ijax,ijay->yx', np.asarray(t2[ki,kj,ka]).conj(), np.asarray(t2[ki,kj,ka])) * 2 -\
-                              einsum('ijax,ijya->yx', np.asarray(t2[ki,kj,ka]).conj(), np.asarray(t2[ki,kj,kb]))
-                dm1occ[kj] += einsum('ixab,iyab->xy', np.asarray(t2[ki,kj,ka]).conj(), np.asarray(t2[ki,kj,ka])) * 2 -\
-                              einsum('ixab,iyba->xy', np.asarray(t2[ki,kj,ka]).conj(), np.asarray(t2[ki,kj,kb]))
+                ijab = np.asarray(t2[ki, kj, ka])
+                ijba = np.asarray(t2[ki, kj, kb])
+                dm1vir[kb] += einsum('ijax,ijay->yx', ijab.conj(), ijab) * 2 -\
+                              einsum('ijax,ijya->yx', ijab.conj(), ijba)
+                dm1occ[kj] += einsum('ixab,iyab->xy', ijab.conj(), ijab) * 2 -\
+                              einsum('ixab,iyba->xy', ijab.conj(), ijba)
     return -dm1occ, dm1vir
 
 
