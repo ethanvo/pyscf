@@ -147,7 +147,10 @@ def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
 
     emp2 /= nkpts
 
-    return emp2, t2
+    if mem_usage > mem_avail:
+        return emp2, t2, ft2
+    else:
+        return emp2, t2
 
 
 def _init_mp_df_eris(mp):
