@@ -10,7 +10,7 @@ BLKMIN = getattr(__config__, 'cc_ccsd_blkmin', 4)
 MEMORYMIN = getattr(__config__, 'cc_ccsd_memorymin', 2000)
 
 def energy(mycc, t1=None, eris=None):
-    '''CCSD correlation energy'''
+    '''CC2 correlation energy'''
     if t1 is None: t1 = mycc.t1
     if eris is None: eris = mycc.ao2mo()
 
@@ -31,7 +31,7 @@ def energy(mycc, t1=None, eris=None):
         e   -=   lib.einsum('iab,Lia,Lb', taui, Lov, Lov[:, i, :])
 
     if abs(e.imag) > 1e-4:
-        logger.warn(mycc, 'Non-zero imaginary part found in CCSD energy %s', e)
+        logger.warn(mycc, 'Non-zero imaginary part found in CC2 energy %s', e)
     return e.real
 
 def update_t1(cc, t1, eris):
@@ -167,8 +167,11 @@ def kernel(mycc, eris=None, t1=None, max_cycle=50, tol=1e-8,
     log = logger.new_logger(mycc, verbose)
     if eris is None:
         eris = mycc.ao2mo(mycc.mo_coeff)
+    nocc = eris.nocc
+    nmo = eris.fock.shape[0]
+    nvir = nmo - nocc
     if t1 is None:
-        t1 = mycc.get_init_guess(eris)[0]
+        t1 = np.zeros((nocc, nvir), dtype=eris.Loo.dtype)
 
     cput1 = cput0 = (logger.process_clock(), logger.perf_counter())
     eold = 0
@@ -206,9 +209,8 @@ def kernel(mycc, eris=None, t1=None, max_cycle=50, tol=1e-8,
     return conv, eccsd, t1
 
 class DFRCC2(ccsd.CCSD):
-    '''restricted CCSD with IP-EOM, EA-EOM, EE-EOM, and SF-EOM capabilities
+    '''Density fitted restricted CC2 without T2 formation
 
-    Ground-state CCSD is performed in optimized ccsd.CCSD and EOM is performed here.
     '''
     energy = energy
     kernel = kernel
@@ -257,23 +259,10 @@ class DFRCC2(ccsd.CCSD):
         Lvo = Lvo.reshape(naux,nocc*nvir)
 
         eris.feri1 = lib.H5TmpFile()
-        eris.oooo = eris.feri1.create_dataset('oooo', (nocc,nocc,nocc,nocc), 'f8')
-        eris.oovv = eris.feri1.create_dataset('oovv', (nocc,nocc,nvir,nvir), 'f8', chunks=(nocc,nocc,1,nvir))
-        eris.ovoo = eris.feri1.create_dataset('ovoo', (nocc,nvir,nocc,nocc), 'f8', chunks=(nocc,1,nocc,nocc))
-        eris.ovvo = eris.feri1.create_dataset('ovvo', (nocc,nvir,nvir,nocc), 'f8', chunks=(nocc,1,nvir,nocc))
-        eris.ovov = eris.feri1.create_dataset('ovov', (nocc,nvir,nocc,nvir), 'f8', chunks=(nocc,1,nocc,nvir))
-        eris.ovvv = eris.feri1.create_dataset('ovvv', (nocc,nvir,nvir_pair), 'f8')
-        eris.vvvv = eris.feri1.create_dataset('vvvv', (nvir_pair,nvir_pair), 'f8')
-        eris.oooo[:] = lib.ddot(Loo.T, Loo).reshape(nocc,nocc,nocc,nocc)
-        eris.ovoo[:] = lib.ddot(Lov.T, Loo).reshape(nocc,nvir,nocc,nocc)
-        eris.oovv[:] = lib.unpack_tril(lib.ddot(Loo.T, Lvv)).reshape(nocc,nocc,nvir,nvir)
-        eris.ovvo[:] = lib.ddot(Lov.T, Lvo).reshape(nocc,nvir,nvir,nocc)
-        eris.ovov[:] = lib.ddot(Lov.T, Lov).reshape(nocc,nvir,nocc,nvir)
-        eris.ovvv[:] = lib.ddot(Lov.T, Lvv).reshape(nocc,nvir,nvir_pair)
-        eris.vvvv[:] = lib.ddot(Lvv.T, Lvv)
         eris.Loo = Loo.reshape(naux,nocc,nocc)
         eris.Lov = Lov.reshape(naux,nocc,nvir)
         eris.Lvo = Lvo.reshape(naux,nvir,nocc)
         eris.Lvv = lib.unpack_tril(Lvv).reshape(naux,nvir,nvir)
-        log.timer('CCSD integral transformation', *cput0)
+        log.timer('CC2 integral transformation', *cput0)
         return eris
+

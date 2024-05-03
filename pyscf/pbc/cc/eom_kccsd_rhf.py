@@ -2340,28 +2340,34 @@ class CVSEOMEESinglet(EOMEESinglet):
         dtype = np.result_type(vector)
         nmo = eom.nmo
         nocc = eom.nocc
+        nvir = nmo - nocc
+        nkpts = eom.nkpts
+        kconserv = eom.get_kconserv_ee_r2(kshift)
         nonessential = np.delete(np.arange(nocc), eom.mandatory)
         input_vec = vector.copy()
-        vec1, vec2 = eom.vector_to_amplitudes(input_vec)
+        vec1, vec2 = vector_to_amplitudes_singlet(input_vec, nkpts, nmo, nocc, kconserv)
         e_shift1 = np.zeros_like(vec1)
         e_shift2 = np.zeros_like(vec2)
         e_shift1[:, nonessential, :] = vec1[:, nonessential, :] * 10.0e15
         e_shift2[:, :, :, nonessential, nonessential[:, np.newaxis], :, :] = vec2[:, :, :, nonessential, nonessential[:, np.newaxis], :, :] * 10.0e15
-        e_shift = eom.amplitudes_to_vector(e_shift1, e_shift2)
+        e_shift = amplitudes_to_vector_singlet(e_shift1, e_shift2, kconserv)
         vector = eeccsd_matvec_singlet(eom, vector, kshift, imds, diag)
         vector += e_shift
 
         return vector
 
-    def get_diag(eom, kshift, imds=None, diag=None):
+    def get_diag(eom, kshift=0, imds=None):
         nmo = eom.nmo
         nocc = eom.nocc
+        nvir = nmo - nocc
+        nkpts = eom.nkpts
+        kconserv = eom.get_kconserv_ee_r2(kshift)
         nonessential = np.delete(np.arange(nocc), eom.mandatory)
-        vector = eeccsd_diag(eom, kshift, imds, diag)
-        Hr1, Hr2 = eom.vector_to_amplitudes(vector)
+        vector = eeccsd_diag(eom, kshift, imds)
+        Hr1, Hr2 = vector_to_amplitudes_singlet(vector, nkpts, nmo, nocc, kconserv)
         Hr1[:, nonessential, :] += 10.0e15
         Hr2[:, :, :, nonessential, nonessential[:, np.newaxis], :, :] += 10.0e15
-        vector = eom.amplitudes_to_vector(Hr1, Hr2)
+        vector = amplitudes_to_vector_singlet(Hr1, Hr2, kconserv)
 
         return vector
 
